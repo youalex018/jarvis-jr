@@ -1,0 +1,6 @@
+# Match the detected ESP32-D0WD-V3 module (4MB flash, no in-package PSRAM)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+
+# Enable FreeRTOS Tickless Idle (for Light Sleep)
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
