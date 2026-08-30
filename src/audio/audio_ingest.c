@@ -62,15 +62,25 @@ static void ingest_task(void *arg) {
         const size_t n = nbytes / sizeof(int32_t);
         int32_t min_s = INT32_MAX;
         int32_t max_s = INT32_MIN;
+
+        uint64_t acc = 0;
         for (size_t i = 0; i < n; i++) {
             // INMP441: 24-bit left-justified in a 32-bit I2S slot
             const int32_t s = samples[i] >> 8;
+            acc += (int64_t)s * (int64_t)s;
+
             if (s < min_s) {
                 min_s = s;
             }
             if (s > max_s) {
                 max_s = s;
             }
+        }
+        uint64_t mean_sq = acc / n;
+        int voiced = (mean_sq >= VAD_MEAN_SQ_MIN);
+
+        if (!voiced) {
+            continue;
         }
 
         const uint32_t count = ++s_buffers;

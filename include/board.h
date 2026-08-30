@@ -1,12 +1,9 @@
 #pragma once
 
+#include "sdkconfig.h"
 #include "driver/gpio.h"
 
 /*
- * Suggested INMP441 map on classic ESP32 (avoid strapping 0/2/12/15,
- * flash 6–11, and UART0 GPIO1/GPIO3). Confirm against the DevKit silkscreen
- * before soldering.
- *
  * INMP441:
  *   VDD -> 3V3
  *   GND -> GND
@@ -14,7 +11,18 @@
  *   SCK -> I2S_BCLK_GPIO
  *   WS  -> I2S_WS_GPIO
  *   SD  -> I2S_SD_GPIO
+ *
+ * ESP32-S3 has no GPIO 22–25. Do not reuse the classic DevKit map.
+ * S3-Nano / Arduino Nano ESP32 header: D7=10, D8=17, D10=21.
  */
-#define I2S_BCLK_GPIO   GPIO_NUM_26
-#define I2S_WS_GPIO     GPIO_NUM_25
-#define I2S_SD_GPIO     GPIO_NUM_33
+#if CONFIG_IDF_TARGET_ESP32S3
+#define I2S_BCLK_GPIO GPIO_NUM_10
+#define I2S_WS_GPIO GPIO_NUM_17
+#define I2S_SD_GPIO GPIO_NUM_21
+#define LED_GPIO GPIO_NUM_48
+#else
+#define I2S_BCLK_GPIO GPIO_NUM_26
+#define I2S_WS_GPIO GPIO_NUM_25
+#define I2S_SD_GPIO GPIO_NUM_33
+#define LED_GPIO GPIO_NUM_48
+#endif
