@@ -24,5 +24,5 @@
 #define I2S_BCLK_GPIO GPIO_NUM_26
 #define I2S_WS_GPIO GPIO_NUM_25
 #define I2S_SD_GPIO GPIO_NUM_33
-#define LED_GPIO GPIO_NUM_48
+#define LED_GPIO GPIO_NUM_2
 #endif

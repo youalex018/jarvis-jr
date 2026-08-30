@@ -31,14 +31,41 @@ Leave the monitor with **Ctrl+C**. While it is open, uploads often fail (the por
 
 ## COM port
 
-`platformio.ini` currently pins `upload_port` and `monitor_port` to **COM3**. That was the old ESP32-D0WD CP2102 dongle.
+`upload_port` / `monitor_port` are **unset** on purpose.
 
-The S3-Nano uses **native USB-C** (Espressif `VID_303A`), not CP2102. After you plug in a **data** USB-C cable:
+| What `pio device list` shows | Meaning |
+|---|---|
+| `BTHENUM\...` Standard Serial over Bluetooth (COM4/COM5 here) | **Not** the ESP32. Do not flash these. |
+| `VID_10C4` / CP2102 | Classic ESP32 DevKit USB-UART |
+| `VID_303A` | ESP32-S3 native USB-C (the Nano) |
 
-1. `pio device list`
-2. Put that COM number into `upload_port` and `monitor_port` in `platformio.ini`
+Until a **data** USB-C cable is plugged into the Nano, you will only see Bluetooth COMs. Charge-only cables do not enumerate.
 
-Charge-only cables will not enumerate a serial port.
+After USB-C enumerates:
+
+1. `pio device list` — pick the `VID_303A` port
+2. Set `upload_port` and `monitor_port` in `platformio.ini`
+
+---
+
+## sdkconfig
+
+Chip-specific options are not all in `sdkconfig.defaults`:
+
+| File | Used when |
+|---|---|
+| `sdkconfig.defaults` | Every target (tickless idle) |
+| `sdkconfig.defaults.esp32s3` | S3-Nano: 16 MB flash, octal PSRAM, USB Serial/JTAG console |
+| `sdkconfig.defaults.esp32` | D0WD: 4 MB flash, no PSRAM |
+
+After changing these, rebuild from scratch:
+
+```powershell
+pio run -t fullclean
+pio run
+```
+
+Expect `CPU Cores: 2` and **non-zero** `External PSRAM` on the Nano.
 
 ---
 
@@ -90,4 +117,4 @@ pio device monitor --baud 115200
 pio device monitor --filter time
 ```
 
-Expect `CPU Cores: 2`. On this S3-Nano, PSRAM should be non-zero **after** the env is configured for octal PSRAM; the current `sdkconfig.defaults` is still the old 4 MB / no-PSRAM DevKit file, so do not treat `External PSRAM: 0 MB` as a silicon defect until that config is split.
+Expect `CPU Cores: 2` and non-zero PSRAM on the Nano. Ingest logs about once a second with `mean_sq` and `voiced` (including silence) so you can set `VAD_MEAN_SQ_MIN`.

@@ -10,6 +10,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "driver/i2s_std.h"
+#include "driver/gpio.h"
 
 static const char *TAG = "ingest";
 
@@ -28,6 +29,15 @@ static SemaphoreHandle_t s_dma_sem;
 static volatile dma_block_t s_block;
 static volatile uint32_t s_overrun;
 static volatile uint32_t s_buffers;
+
+static esp_err_t led_init(void) {
+    gpio_reset_pin(LED_GPIO);
+    esp_err_t err = gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
+    if (err != ESP_OK) {
+        return err; // fail if LED GPIO is not available
+    }
+    return gpio_set_level(LED_GPIO, 0); // Set LED off initially
+}
 
 static bool IRAM_ATTR on_recv(i2s_chan_handle_t handle, i2s_event_data_t *event, void *user_ctx) {
     (void)handle;
@@ -79,22 +89,32 @@ static void ingest_task(void *arg) {
         uint64_t mean_sq = acc / n;
         int voiced = (mean_sq >= VAD_MEAN_SQ_MIN);
 
-        if (!voiced) {
-            continue;
-        }
-
         const uint32_t count = ++s_buffers;
+        // logging
         if ((count % LOG_EVERY_BUFFERS) == 0) {
             ESP_LOGI(TAG,
-                     "buf=%" PRIu32 " frames=%u min=%" PRId32 " max=%" PRId32
+                     "buf=%" PRIu32 " frames=%u mean_sq=%" PRIu64 " voiced=%d"
+                     " min=%" PRId32 " max=%" PRId32
                      " ovf=%" PRIu32 " first=%08" PRIx32,
-                     count, (unsigned)n, min_s, max_s, s_overrun,
+                     count, (unsigned)n, mean_sq, voiced,
+                     min_s, max_s, s_overrun,
                      (uint32_t)samples[0]);
+        }
+
+        gpio_set_level(LED_GPIO, voiced ? 1 : 0);
+
+        if (!voiced) {
+            continue;
         }
     }
 }
 
 esp_err_t audio_ingest_start(void) {
+    esp_err_t err = led_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+
     s_dma_sem = xSemaphoreCreateBinary();
     if (s_dma_sem == NULL) {
         return ESP_ERR_NO_MEM;
@@ -104,7 +124,7 @@ esp_err_t audio_ingest_start(void) {
     chan_cfg.dma_desc_num  = AUDIO_DMA_DESC_NUM;
     chan_cfg.dma_frame_num = AUDIO_DMA_FRAME_NUM;
 
-    esp_err_t err = i2s_new_channel(&chan_cfg, NULL, &s_rx);
+    err = i2s_new_channel(&chan_cfg, NULL, &s_rx);
     if (err != ESP_OK) {
         return err;
     }
@@ -160,5 +180,8 @@ esp_err_t audio_ingest_start(void) {
              AUDIO_DMA_DESC_NUM, AUDIO_DMA_FRAME_NUM);
     ESP_LOGI(TAG, "INMP441  BCLK=%d WS=%d SD=%d  (L/R=GND, VDD=3V3)",
              (int)I2S_BCLK_GPIO, (int)I2S_WS_GPIO, (int)I2S_SD_GPIO);
+    ESP_LOGI(TAG, "VAD mean_sq min=%" PRIu64 " (raise after you see quiet vs speak logs)",
+             (uint64_t)VAD_MEAN_SQ_MIN);
+    ESP_LOGI(TAG, "LED GPIO %d on when voiced", (int)LED_GPIO);
     return ESP_OK;
 }
