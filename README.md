@@ -1,6 +1,6 @@
 # Jarvis-Jr — build, flash, serial
 
-ESP-IDF firmware via PlatformIO. Run these from `C:\Users\alexj\PlatformIO\Jarvis-Jr` in a **new** PowerShell. Active env today: `esp32-s3-devkitc-1` (Waveshare ESP32-S3-Nano).
+ESP-IDF firmware via PlatformIO. Run these in a **new** PowerShell. Active env: `esp32-s3-nano` (`board = arduino_nano_esp32` — Waveshare ESP32-S3-Nano / Arduino Nano ESP32).
 
 If `pio` is not found:
 
@@ -31,56 +31,46 @@ Leave the monitor with **Ctrl+C**. While it is open, uploads often fail (the por
 
 ## COM port
 
-`upload_port` / `monitor_port` are **unset** on purpose.
+| VID:PID | What it is | Use with esptool? |
+|---|---|---|
+| `2341:0070` | Arduino CDC (factory). Was COM9. | **No** |
+| `303A:1001` | ESP32 ROM download | **Yes — first IDF flash** |
+| `303A:4001` | This firmware’s USB Serial/JTAG | Monitor / later flashes |
+| `BTHENUM` | Bluetooth | Never |
 
-| What `pio device list` shows | Meaning |
-|---|---|
-| `BTHENUM\...` Standard Serial over Bluetooth (COM4/COM5 here) | **Not** the ESP32. Do not flash these. |
-| `VID_10C4` / CP2102 | Classic ESP32 DevKit USB-UART |
-| `VID_303A` | ESP32-S3 native USB-C (the Nano) |
+There is no BOOT button. **B1** (GPIO0) is on the **3V3 / VUSB** side of the header.
 
-Until a **data** USB-C cable is plugged into the Nano, you will only see Bluetooth COMs. Charge-only cables do not enumerate.
+**First IDF flash (Arduino factory image):**
 
-After USB-C enumerates:
+1. Unplug/replug so USB is healthy again. Close the monitor.
+2. Jumper **B1 to GND**. RGB should go **green**.
+3. Tap **RST** while the jumper is on.
+4. **Remove the jumper**. RGB should stay **purple**.
+5. `pio device list` — pick **`303A:1001`** (new COM, not 2341).
+6. Set `upload_port` / `monitor_port` in `platformio.ini` to that COM.
+7. `pio run -t upload` immediately.
+8. Tap **RST** once more so the new app starts.
 
-1. `pio device list` — pick the `VID_303A` port
-2. Set `upload_port` and `monitor_port` in `platformio.ini`
+Do not double-tap RST (Arduino DFU / green fade). Do not flash `2341:0070`.
 
 ---
 
 ## sdkconfig
 
-Chip-specific options are not all in `sdkconfig.defaults`:
-
-| File | Used when |
+| File | Role |
 |---|---|
-| `sdkconfig.defaults` | Every target (tickless idle) |
-| `sdkconfig.defaults.esp32s3` | S3-Nano: 16 MB flash, octal PSRAM, USB Serial/JTAG console |
-| `sdkconfig.defaults.esp32` | D0WD: 4 MB flash, no PSRAM |
+| `sdkconfig.defaults` | Tickless idle |
+| `sdkconfig.defaults.esp32s3` | 16 MB flash, octal PSRAM, USB Serial/JTAG |
 
-After changing these, rebuild from scratch:
-
-```powershell
-pio run -t fullclean
-pio run
-```
+PlatformIO generates `sdkconfig.esp32-s3-nano` locally; it is gitignored. After changing the `.defaults` files: `pio run -t fullclean` then `pio run`.
 
 Expect `CPU Cores: 2` and **non-zero** `External PSRAM` on the Nano.
 
 ---
 
-## If upload fails (download / bootloader mode)
+## If upload fails (ROM download)
 
-**ESP32-S3-Nano**
-
-1. Hold **BOOT** (sometimes labeled B1).
-2. Tap **RST**, or plug the USB-C in while holding BOOT.
-3. Release BOOT.
-4. `pio run -t upload`
-
-**Classic ESP32 DevKit (if you turn `esp32dev` back on)**
-
-Hold **BOOT**, tap **RESET**, release **BOOT**, then upload.
+Jumper **B1 to GND**, tap **RST**, remove the jumper (RGB purple), then flash the `303A:1001` COM from `pio device list`.
 
 ---
 
@@ -89,7 +79,7 @@ Hold **BOOT**, tap **RESET**, release **BOOT**, then upload.
 There is no logic analyzer. Use:
 
 - `pio device monitor` — boot banner, `ingest:` lines, `ovf`, min/max
-- On-board LED later (`LED_GPIO` in `include/board.h`)
+- On-board LED (`LED_GPIO` in `include/board.h`) — D13 / GPIO 48
 - Rebuild with extra `ESP_LOGI` in the ingest task if you need a number
 
 GDB (`pio debug`) needs a debug session in Cursor/VS Code. The S3 has built-in USB JTAG; it is not required for bring-up. Prefer serial logs until ingest is proven.
@@ -106,8 +96,6 @@ GDB (`pio debug`) needs a debug session in Cursor/VS Code. The S3 has built-in U
 | VDD | — | 3V3 |
 | GND, L/R | — | GND |
 
-Classic ESP32 pins (26 / 25 / 33) apply only if you compile the `esp32dev` env.
-
 ---
 
 ## Monitor tips
@@ -117,4 +105,4 @@ pio device monitor --baud 115200
 pio device monitor --filter time
 ```
 
-Expect `CPU Cores: 2` and non-zero PSRAM on the Nano. Ingest logs about once a second with `mean_sq` and `voiced` (including silence) so you can set `VAD_MEAN_SQ_MIN`.
+Expect `CPU Cores: 2` and non-zero PSRAM on the Nano. Ingest logs about once a second with `dc`, `ac`, `noise`, and `voiced`. Stay quiet for ~0.5 s after boot so the noise floor can learn.

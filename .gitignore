@@ -4,3 +4,9 @@
 .vscode/launch.json
 .vscode/ipch
 temp/
+
+# ESP-IDF generated per env
+sdkconfig
+sdkconfig.*
+!sdkconfig.defaults
+!sdkconfig.defaults.*

@@ -29,6 +29,11 @@ static SemaphoreHandle_t s_dma_sem;
 static volatile dma_block_t s_block;
 static volatile uint32_t s_overrun;
 static volatile uint32_t s_buffers;
+static uint64_t s_noise;
+static uint32_t s_boot_left = VAD_BOOT_BLOCKS;
+static uint32_t s_on_run;
+static uint32_t s_off_run;
+static int s_led_on;
 
 static esp_err_t led_init(void) {
     gpio_reset_pin(LED_GPIO);
@@ -72,13 +77,11 @@ static void ingest_task(void *arg) {
         const size_t n = nbytes / sizeof(int32_t);
         int32_t min_s = INT32_MAX;
         int32_t max_s = INT32_MIN;
+        int64_t sum = 0;
 
-        uint64_t acc = 0;
         for (size_t i = 0; i < n; i++) {
-            // INMP441: 24-bit left-justified in a 32-bit I2S slot
             const int32_t s = samples[i] >> 8;
-            acc += (int64_t)s * (int64_t)s;
-
+            sum += s;
             if (s < min_s) {
                 min_s = s;
             }
@@ -86,26 +89,56 @@ static void ingest_task(void *arg) {
                 max_s = s;
             }
         }
-        uint64_t mean_sq = acc / n;
-        int voiced = (mean_sq >= VAD_MEAN_SQ_MIN);
+        // Compute DC offset (mean) and AC power (mean squared zero-mean samples)
+        const int32_t dc = (int32_t)(sum / (int64_t)n);
+
+        uint64_t acc_ac = 0;
+        for (size_t i = 0; i < n; i++) {
+            const int64_t d = (int64_t)(samples[i] >> 8) - dc;
+            acc_ac += (uint64_t)(d * d); // accumulate squared AC samples
+        }
+        const uint64_t ac_mean_sq = acc_ac / n;
+
+        int voiced;
+        if (s_boot_left > 0) {
+            s_boot_left--;
+            voiced = 0;
+            s_noise = (s_noise == 0) ? ac_mean_sq : (s_noise * 3 + ac_mean_sq) / 4; // learn noise floor
+        } else {
+            uint64_t thresh = UINT64_MAX;
+            if (s_noise <= (UINT64_MAX / VAD_RATIO_K)) {
+                thresh = s_noise * VAD_RATIO_K; // voice if ac_mean_sq > K * noise floor
+            }
+            voiced = (ac_mean_sq > thresh);
+            if (!voiced) {
+                s_noise = (s_noise * 19 + ac_mean_sq) / 20;
+            }
+        }
 
         const uint32_t count = ++s_buffers;
-        // logging
         if ((count % LOG_EVERY_BUFFERS) == 0) {
             ESP_LOGI(TAG,
-                     "buf=%" PRIu32 " frames=%u mean_sq=%" PRIu64 " voiced=%d"
-                     " min=%" PRId32 " max=%" PRId32
-                     " ovf=%" PRIu32 " first=%08" PRIx32,
-                     count, (unsigned)n, mean_sq, voiced,
-                     min_s, max_s, s_overrun,
-                     (uint32_t)samples[0]);
+                     "buf=%" PRIu32 " frames=%u dc=%" PRId32
+                     " ac=%" PRIu64 " noise=%" PRIu64 " voiced=%d"
+                     " min=%" PRId32 " max=%" PRId32 " ovf=%" PRIu32,
+                     count, (unsigned)n, dc, ac_mean_sq, s_noise, voiced,
+                     min_s, max_s, s_overrun); // log every ~1 sec
         }
 
-        gpio_set_level(LED_GPIO, voiced ? 1 : 0);
-
-        if (!voiced) {
-            continue;
+        if (voiced) {
+            s_on_run++;
+            s_off_run = 0;
+            if (s_on_run >= VAD_ON_BLOCKS) {
+                s_led_on = 1;
+            }
+        } else {
+            s_off_run++;
+            s_on_run = 0;
+            if (s_off_run >= VAD_OFF_BLOCKS) {
+                s_led_on = 0;
+            }
         }
+        gpio_set_level(LED_GPIO, s_led_on);
     }
 }
 
@@ -180,8 +213,8 @@ esp_err_t audio_ingest_start(void) {
              AUDIO_DMA_DESC_NUM, AUDIO_DMA_FRAME_NUM);
     ESP_LOGI(TAG, "INMP441  BCLK=%d WS=%d SD=%d  (L/R=GND, VDD=3V3)",
              (int)I2S_BCLK_GPIO, (int)I2S_WS_GPIO, (int)I2S_SD_GPIO);
-    ESP_LOGI(TAG, "VAD mean_sq min=%" PRIu64 " (raise after you see quiet vs speak logs)",
-             (uint64_t)VAD_MEAN_SQ_MIN);
+    ESP_LOGI(TAG, "VAD: ac > %d*noise, LED debounce on=%d off=%d blocks (~32 ms each)",
+             VAD_RATIO_K, VAD_ON_BLOCKS, VAD_OFF_BLOCKS);
     ESP_LOGI(TAG, "LED GPIO %d on when voiced", (int)LED_GPIO);
     return ESP_OK;
 }
