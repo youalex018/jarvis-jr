@@ -1,4 +1,4 @@
-# Jarvis-Jr — build, flash, serial
+# Jarvis-Jr - Edge AI Voice Activated Light Controller
 
 ESP-IDF firmware via PlatformIO. Run these in a **new** PowerShell. Active env: `esp32-s3-nano` (`board = arduino_nano_esp32` — Waveshare ESP32-S3-Nano / Arduino Nano ESP32).
 

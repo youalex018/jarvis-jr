@@ -2,11 +2,13 @@
 #include "audio_ingest.h"
 #include "audio_dsp.h"
 #include "board.h"
+#include "net.h"
 
 #include <inttypes.h>
 #include <stdint.h>
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -27,7 +29,6 @@ typedef struct {
 
 static i2s_chan_handle_t s_rx;
 static TaskHandle_t s_ingest_task;
-static QueueHandle_t s_dma_queue;
 static SemaphoreHandle_t s_dma_sem;
 static volatile dma_block_t s_block;
 static volatile uint32_t s_overrun;
@@ -37,6 +38,11 @@ static uint32_t s_boot_left = VAD_BOOT_BLOCKS;
 static uint32_t s_on_run;
 static uint32_t s_off_run;
 static int s_led_on;
+static int s_led_prev;
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+static audio_ingest_stats_t s_stats;
+static int64_t s_prev_wake;
+static bool s_log_enabled = true;
 
 static esp_err_t led_init(void) {
     gpio_reset_pin(LED_GPIO);
@@ -69,6 +75,7 @@ static void ingest_task(void *arg) {
             continue;
         }
 
+        const int64_t t0 = esp_timer_get_time();
         const int32_t *samples = s_block.samples;
         size_t nbytes = s_block.nbytes;
         s_block.samples = NULL;
@@ -122,25 +129,6 @@ static void ingest_task(void *arg) {
             (void)audio_dsp_try_submit(samples, n, ac_mean_sq);
         }
 
-        // hwm_in - how much stack space is left in the ingest task
-        // hwm_dsp - how much stack space is left in the DSP task
-        // qdepth - how many blocks are waiting in the DSP queue
-        // qdrop - how many blocks have been dropped by the DSP queue
-        const uint32_t count = ++s_buffers;
-        if ((count % LOG_EVERY_BUFFERS) == 0) {
-            ESP_LOGI(TAG,
-                     "buf=%" PRIu32 " frames=%u dc=%" PRId32
-                     " ac=%" PRIu64 " noise=%" PRIu64 " voiced=%d"
-                     " min=%" PRId32 " max=%" PRId32 " ovf=%" PRIu32
-                     " hwm_in=%u hwm_dsp=%u qdepth=%u qdrop=%" PRIu32,
-                     count, (unsigned)n, dc, ac_mean_sq, s_noise, voiced,
-                     min_s, max_s, s_overrun,
-                     (unsigned)uxTaskGetStackHighWaterMark(s_ingest_task),
-                     (unsigned)uxTaskGetStackHighWaterMark(audio_dsp_task()),
-                     (unsigned)audio_dsp_queue_waiting(),
-                     audio_dsp_drops());
-        }
-
         if (voiced) {
             s_on_run++;
             s_off_run = 0;
@@ -155,7 +143,94 @@ static void ingest_task(void *arg) {
             }
         }
         gpio_set_level(LED_GPIO, s_led_on);
+        if (s_led_on != s_led_prev) {
+            net_set_light(s_led_on != 0);
+            s_led_prev = s_led_on;
+        }
+
+        const int64_t t1 = esp_timer_get_time();
+        const uint32_t proc_us = (uint32_t)(t1 - t0);
+        uint32_t period_us = 0;
+        if (s_prev_wake != 0) {
+            period_us = (uint32_t)(t0 - s_prev_wake);
+        }
+        s_prev_wake = t0;
+
+        uint32_t proc_max_us;
+        uint32_t period_max_us;
+        taskENTER_CRITICAL(&s_lock);
+        s_stats.blocks++;
+        s_stats.proc_last_us = proc_us;
+        if (proc_us > s_stats.proc_max_us) {
+            s_stats.proc_max_us = proc_us;
+        }
+        s_stats.proc_total_us += proc_us;
+        if (period_us != 0) {
+            s_stats.period_last_us = period_us;
+            if (period_us > s_stats.period_max_us) {
+                s_stats.period_max_us = period_us;
+            }
+            if (s_stats.period_min_us == 0 || period_us < s_stats.period_min_us) {
+                s_stats.period_min_us = period_us;
+            }
+        }
+        s_stats.noise = s_noise;
+        s_stats.voiced = voiced;
+        s_stats.led_on = s_led_on;
+        proc_max_us = s_stats.proc_max_us;
+        period_max_us = s_stats.period_max_us;
+        taskEXIT_CRITICAL(&s_lock);
+
+        const uint32_t count = ++s_buffers;
+        if (s_log_enabled && (count % LOG_EVERY_BUFFERS) == 0) {
+            ESP_LOGI(TAG,
+                     "buf=%" PRIu32 " frames=%u dc=%" PRId32
+                     " ac=%" PRIu64 " noise=%" PRIu64 " voiced=%d"
+                     " min=%" PRId32 " max=%" PRId32 " ovf=%" PRIu32
+                     " hwm_in=%u hwm_dsp=%u qdepth=%u qdrop=%" PRIu32
+                     " proc_us=%" PRIu32 "/%" PRIu32
+                     " period_us=%" PRIu32 "/%" PRIu32,
+                     count, (unsigned)n, dc, ac_mean_sq, s_noise, voiced,
+                     min_s, max_s, s_overrun,
+                     (unsigned)uxTaskGetStackHighWaterMark(s_ingest_task),
+                     (unsigned)uxTaskGetStackHighWaterMark(audio_dsp_task()),
+                     (unsigned)audio_dsp_queue_waiting(),
+                     audio_dsp_drops(),
+                     proc_us, proc_max_us,
+                     period_us, period_max_us);
+        }
     }
+}
+
+void audio_ingest_get_stats(audio_ingest_stats_t *out) {
+    if (out == NULL) {
+        return;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    *out = s_stats;
+    out->overrun = s_overrun;
+    taskEXIT_CRITICAL(&s_lock);
+    out->stack_hwm = (uint32_t)uxTaskGetStackHighWaterMark(s_ingest_task);
+}
+
+void audio_ingest_reset_stats(void) {
+    // ISR may increment s_overrun on this or the other core during the store.
+    // A rare lost count is acceptable for a debug counter
+    taskENTER_CRITICAL(&s_lock);
+    s_overrun = 0;
+    s_stats.blocks = 0;
+    s_stats.overrun = 0;
+    s_stats.proc_last_us = 0;
+    s_stats.proc_max_us = 0;
+    s_stats.proc_total_us = 0;
+    s_stats.period_last_us = 0;
+    s_stats.period_max_us = 0;
+    s_stats.period_min_us = 0;
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+void audio_ingest_set_log(bool on) {
+    s_log_enabled = on;
 }
 
 esp_err_t audio_ingest_start(void) {

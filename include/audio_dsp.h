@@ -20,3 +20,15 @@ bool audio_dsp_try_submit(const int32_t *dma_samples, size_t n, uint64_t ac_mean
 uint32_t audio_dsp_drops(void);
 UBaseType_t audio_dsp_queue_waiting(void);
 TaskHandle_t audio_dsp_task(void);
+
+typedef struct {
+    uint32_t blocks; // voiced blocks consumed
+    uint32_t drops;
+    uint32_t depth; // filled queue now
+    uint32_t proc_last_us; // stub: ~0 today, inference later
+    uint32_t proc_max_us;
+    uint32_t stack_hwm;
+} audio_dsp_stats_t;
+
+void audio_dsp_get_stats(audio_dsp_stats_t *out);
+void audio_dsp_reset_stats(void);

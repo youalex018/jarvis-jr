@@ -5,6 +5,8 @@
 #include "esp_system.h"
 #include "audio_dsp.h"
 #include "audio_ingest.h"
+#include "cli.h"
+#include "net.h"
 
 static const char *TAG = "boot";
 
@@ -20,5 +22,7 @@ void app_main(void) {
 
     ESP_ERROR_CHECK(audio_dsp_start());
     ESP_ERROR_CHECK(audio_ingest_start());
-    ESP_LOGI(TAG, "dsp + ingest running; app_main returning");
+    ESP_ERROR_CHECK(cli_start());
+    ESP_ERROR_CHECK(net_start());
+    ESP_LOGI(TAG, "dsp + ingest + cli + net running; app_main returning");
 }
