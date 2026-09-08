@@ -1,5 +1,6 @@
 // Ingest audio from I2S microphone (INMP441) at 16 kHz, 32-bit Philips format, mono left channel
 #include "audio_ingest.h"
+#include "audio_dsp.h"
 #include "board.h"
 
 #include <inttypes.h>
@@ -22,9 +23,11 @@ static const char *TAG = "ingest";
 typedef struct {
     const int32_t *samples;
     size_t nbytes;
-} dma_block_t;
+} dma_block_t; // DMA block descriptor passed from ISR to ingest task
 
 static i2s_chan_handle_t s_rx;
+static TaskHandle_t s_ingest_task;
+static QueueHandle_t s_dma_queue;
 static SemaphoreHandle_t s_dma_sem;
 static volatile dma_block_t s_block;
 static volatile uint32_t s_overrun;
@@ -115,14 +118,27 @@ static void ingest_task(void *arg) {
             }
         }
 
+        if (voiced) {
+            (void)audio_dsp_try_submit(samples, n, ac_mean_sq);
+        }
+
+        // hwm_in - how much stack space is left in the ingest task
+        // hwm_dsp - how much stack space is left in the DSP task
+        // qdepth - how many blocks are waiting in the DSP queue
+        // qdrop - how many blocks have been dropped by the DSP queue
         const uint32_t count = ++s_buffers;
         if ((count % LOG_EVERY_BUFFERS) == 0) {
             ESP_LOGI(TAG,
                      "buf=%" PRIu32 " frames=%u dc=%" PRId32
                      " ac=%" PRIu64 " noise=%" PRIu64 " voiced=%d"
-                     " min=%" PRId32 " max=%" PRId32 " ovf=%" PRIu32,
+                     " min=%" PRId32 " max=%" PRId32 " ovf=%" PRIu32
+                     " hwm_in=%u hwm_dsp=%u qdepth=%u qdrop=%" PRIu32,
                      count, (unsigned)n, dc, ac_mean_sq, s_noise, voiced,
-                     min_s, max_s, s_overrun); // log every ~1 sec
+                     min_s, max_s, s_overrun,
+                     (unsigned)uxTaskGetStackHighWaterMark(s_ingest_task),
+                     (unsigned)uxTaskGetStackHighWaterMark(audio_dsp_task()),
+                     (unsigned)audio_dsp_queue_waiting(),
+                     audio_dsp_drops());
         }
 
         if (voiced) {
@@ -199,7 +215,8 @@ esp_err_t audio_ingest_start(void) {
     }
 
     BaseType_t ok = xTaskCreatePinnedToCore(ingest_task, "ingest", INGEST_TASK_STACK,
-                                            NULL, INGEST_TASK_PRIO, NULL, INGEST_TASK_CORE);
+                                            NULL, INGEST_TASK_PRIO, &s_ingest_task,
+                                            INGEST_TASK_CORE); // high priority to avoid DMA overrun
     if (ok != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
