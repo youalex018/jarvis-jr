@@ -2,6 +2,10 @@
 
 ESP-IDF firmware via PlatformIO. Run these in a **new** PowerShell. Active env: `esp32-s3-nano` (`board = arduino_nano_esp32` — Waveshare ESP32-S3-Nano / Arduino Nano ESP32).
 
+On-device **"Hey Jarvis"** (microWakeWord v2 INT8) toggles a local WiZ bulb over UDP. The GPIO LED is a VAD debug indicator, not the actuator. No cloud.
+
+After clone: `git submodule update --init --recursive`. The factory app partition is **4 MB** (`partitions.csv`); TFLM does not fit the default 1 MB app. If the compile runs out of RAM, use `pio run -j 2`.
+
 If `pio` is not found:
 
 ```powershell
@@ -18,7 +22,7 @@ Use that full path in place of `pio` below, or restart the terminal after instal
 |---|---|
 | Toolchain alive | `pio --version` |
 | Which COM port Windows gave the board | `pio device list` |
-| Compile only (no cable) | `pio run` |
+| Compile only (no cable) | `pio run` (`pio run -j 2` if TFLM OOMs) |
 | Compile and flash | `pio run -t upload` |
 | Serial logs (115200) | `pio device monitor` |
 | Flash, then open serial | `pio run -t upload -t monitor` |
@@ -60,11 +64,26 @@ Do not double-tap RST (Arduino DFU / green fade). Do not flash `2341:0070`.
 | File | Role |
 |---|---|
 | `sdkconfig.defaults` | Tickless idle |
-| `sdkconfig.defaults.esp32s3` | 16 MB flash, octal PSRAM, USB Serial/JTAG |
+| `sdkconfig.defaults.esp32s3` | 16 MB flash, octal PSRAM, USB Serial/JTAG, custom `partitions.csv` |
 
 PlatformIO generates `sdkconfig.esp32-s3-nano` locally; it is gitignored. After changing the `.defaults` files: `pio run -t fullclean` then `pio run`.
 
 Expect `CPU Cores: 2` and **non-zero** `External PSRAM` on the Nano.
+
+---
+
+## First-party, generated, submodule, vendored
+
+| Path | What it is |
+|---|---|
+| `src/`, `include/` | First-party C |
+| `components/wake_model/` (`wake_model.cc`, `gen_model_c.py`) | First-party C++ TFLM wrapper |
+| `models/hey_jarvis.tflite` | Checked-in model binary (source of truth) |
+| `hey_jarvis_model.c` | **Generated** at CMake configure from the `.tflite`; gitignored |
+| `components/esp-tflite-micro` | **Git submodule** (`espressif/esp-tflite-micro`, pin `99f49e1` in `.gitmodules`) |
+| `components/tflite_microfrontend/` | **Vendored** TFLM frontend (not a submodule). See `ORIGIN.txt` |
+| `managed_components/`, `dependencies.lock` | **Generated** IDF Component Manager fetch of `esp-nn`; gitignored |
+| `.pio/`, `sdkconfig.esp32-s3-nano` | **Generated** PlatformIO/IDF build; gitignored |
 
 ---
 
@@ -78,7 +97,7 @@ Jumper **B1 to GND**, tap **RST**, remove the jumper (RGB purple), then flash th
 
 There is no logic analyzer. Use:
 
-- `pio device monitor` — boot banner, `ingest:` lines, `ovf`, min/max
+- `pio device monitor` — boot banner, `ingest:` lines, `hey jarvis` detections, `ovf`, min/max
 - On-board LED (`LED_GPIO` in `include/board.h`) — D13 / GPIO 48
 - Rebuild with extra `ESP_LOGI` in the ingest task if you need a number
 

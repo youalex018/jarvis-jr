@@ -2,7 +2,6 @@
 #include "audio_ingest.h"
 #include "audio_dsp.h"
 #include "board.h"
-#include "net.h"
 
 #include <inttypes.h>
 #include <stdint.h>
@@ -18,8 +17,8 @@
 static const char *TAG = "ingest";
 
 #define INGEST_TASK_STACK 4096
-#define INGEST_TASK_PRIO 10          // high - Wi-Fi stays higher when added
-#define INGEST_TASK_CORE 1           // APP_CPU - PRO_CPU hosts Wi-Fi later
+#define INGEST_TASK_PRIO 10          // high - above DSP and net; Wi-Fi driver is higher
+#define INGEST_TASK_CORE 1           // APP_CPU; PRO_CPU hosts Wi-Fi / net
 #define LOG_EVERY_BUFFERS 32          // ~1 s at 16 kHz / 512 frames
 
 typedef struct {
@@ -38,7 +37,7 @@ static uint32_t s_boot_left = VAD_BOOT_BLOCKS;
 static uint32_t s_on_run;
 static uint32_t s_off_run;
 static int s_led_on;
-static int s_led_prev;
+static uint32_t s_hang_left;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static audio_ingest_stats_t s_stats;
 static int64_t s_prev_wake;
@@ -126,7 +125,13 @@ static void ingest_task(void *arg) {
         }
 
         if (voiced) {
+            s_hang_left = VAD_HANGOVER_BLOCKS;
+        }
+        if (voiced || s_hang_left > 0) {
             (void)audio_dsp_try_submit(samples, n, ac_mean_sq);
+            if (!voiced) {
+                s_hang_left--;
+            }
         }
 
         if (voiced) {
@@ -143,10 +148,6 @@ static void ingest_task(void *arg) {
             }
         }
         gpio_set_level(LED_GPIO, s_led_on);
-        if (s_led_on != s_led_prev) {
-            net_set_light(s_led_on != 0);
-            s_led_prev = s_led_on;
-        }
 
         const int64_t t1 = esp_timer_get_time();
         const uint32_t proc_us = (uint32_t)(t1 - t0);
@@ -305,8 +306,8 @@ esp_err_t audio_ingest_start(void) {
              AUDIO_DMA_DESC_NUM, AUDIO_DMA_FRAME_NUM);
     ESP_LOGI(TAG, "INMP441  BCLK=%d WS=%d SD=%d  (L/R=GND, VDD=3V3)",
              (int)I2S_BCLK_GPIO, (int)I2S_WS_GPIO, (int)I2S_SD_GPIO);
-    ESP_LOGI(TAG, "VAD: ac > %d*noise, LED debounce on=%d off=%d blocks (~32 ms each)",
-             VAD_RATIO_K, VAD_ON_BLOCKS, VAD_OFF_BLOCKS);
-    ESP_LOGI(TAG, "LED GPIO %d on when voiced", (int)LED_GPIO);
+    ESP_LOGI(TAG, "VAD: ac > %d*noise, LED debounce on=%d off=%d hangover=%d blocks (~32 ms each)",
+             VAD_RATIO_K, VAD_ON_BLOCKS, VAD_OFF_BLOCKS, VAD_HANGOVER_BLOCKS);
+    ESP_LOGI(TAG, "LED GPIO %d on when voiced; bulb follows hey jarvis", (int)LED_GPIO);
     return ESP_OK;
 }

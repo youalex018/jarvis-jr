@@ -1,3 +1,4 @@
+// Boot: start DSP, ingest, CLI, and net.
 #include <stdio.h>
 #include "esp_log.h"
 #include "esp_chip_info.h"

@@ -1,0 +1,5 @@
+Vendored snapshot (not a git submodule) from tensorflow/tflite-micro (Apache-2.0):
+  tensorflow/lite/experimental/microfrontend/lib
+
+esp-tflite-micro v1.4.0 (IDF 6 support) no longer ships these sources.
+Kiss FFT is provided by the esp-tflite-micro third_party/kissfft include path.

@@ -1,0 +1,5 @@
+# Git submodule: Espressif TensorFlow Lite Micro.
+# The pin is the gitlink SHA (99f49e1), not tag v1.3.8 (no IDF 6 support).
+[submodule "components/esp-tflite-micro"]
+	path = components/esp-tflite-micro
+	url = https://github.com/espressif/esp-tflite-micro.git

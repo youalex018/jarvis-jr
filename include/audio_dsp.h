@@ -8,8 +8,8 @@
 #include "freertos/task.h"
 
 #define AUDIO_DSP_QUEUE_LEN 4   // ~128 ms of voiced 32 ms blocks
-#define DSP_TASK_STACK 3072
-#define DSP_TASK_PRIO 5         // medium — below ingest, above future net
+#define DSP_TASK_STACK 8192
+#define DSP_TASK_PRIO 5         // medium - below ingest, above net
 #define DSP_TASK_CORE 1         // APP_CPU; PRO_CPU stays free for Wi-Fi
 
 esp_err_t audio_dsp_start(void);
@@ -22,12 +22,20 @@ UBaseType_t audio_dsp_queue_waiting(void);
 TaskHandle_t audio_dsp_task(void);
 
 typedef struct {
-    uint32_t blocks; // voiced blocks consumed
+    uint32_t blocks;         // voiced blocks consumed
     uint32_t drops;
-    uint32_t depth; // filled queue now
-    uint32_t proc_last_us; // stub: ~0 today, inference later
+    uint32_t depth;          // filled queue now
+    uint32_t proc_last_us;
     uint32_t proc_max_us;
     uint32_t stack_hwm;
+    uint32_t slices;
+    uint32_t infers;
+    uint32_t infer_last_us;
+    uint32_t infer_max_us;
+    uint32_t prob_last;
+    uint32_t detections;
+    uint32_t resets;
+    uint32_t arena_used;
 } audio_dsp_stats_t;
 
 void audio_dsp_get_stats(audio_dsp_stats_t *out);

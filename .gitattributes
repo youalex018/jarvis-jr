@@ -1,0 +1,12 @@
+# Superproject text files use LF. This does not rewrite the TFLM submodule.
+* text=auto eol=lf
+*.tflite binary
+
+# Git submodule (see .gitmodules): espressif/esp-tflite-micro
+components/esp-tflite-micro/** linguist-vendored
+
+# Vendored snapshot, not a submodule (see components/tflite_microfrontend/ORIGIN.txt)
+components/tflite_microfrontend/** linguist-vendored
+
+# Generated at CMake configure from models/hey_jarvis.tflite (also gitignored)
+hey_jarvis_model.c linguist-generated

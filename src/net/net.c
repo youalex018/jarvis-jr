@@ -29,6 +29,18 @@ static int s_sock = -1;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static net_stats_t s_stats;
 static char s_wiz_ip[16];
+static bool s_light_on;
+
+static void enqueue_light(bool on) {
+    if (s_light_q == NULL) {
+        return;
+    }
+    if (xQueueSend(s_light_q, &on, 0) != pdTRUE) {
+        taskENTER_CRITICAL(&s_lock);
+        s_stats.drops++;
+        taskEXIT_CRITICAL(&s_lock);
+    }
+}
 
 static esp_err_t nvs_init(void) {
     esp_err_t err = nvs_flash_init();
@@ -225,17 +237,16 @@ esp_err_t net_start(void) {
 }
 
 void net_set_light(bool on) {
-    if (s_light_q == NULL) {
-        return;
-    }
-    if (xQueueSend(s_light_q, &on, 0) != pdTRUE) {
-        taskENTER_CRITICAL(&s_lock);
-        s_stats.drops++;
-        taskEXIT_CRITICAL(&s_lock);
-    }
+    taskENTER_CRITICAL(&s_lock);
+    s_light_on = on;
+    taskEXIT_CRITICAL(&s_lock);
+    enqueue_light(on);
 }
 
 bool net_send_light_now(bool on) {
+    taskENTER_CRITICAL(&s_lock);
+    s_light_on = on;
+    taskEXIT_CRITICAL(&s_lock);
     if (s_light_q == NULL) {
         return false;
     }
@@ -246,6 +257,16 @@ bool net_send_light_now(bool on) {
         return false;
     }
     return true;
+}
+
+bool net_toggle_light(void) {
+    bool next;
+    taskENTER_CRITICAL(&s_lock);
+    s_light_on = !s_light_on;
+    next = s_light_on;
+    taskEXIT_CRITICAL(&s_lock);
+    enqueue_light(next);
+    return next;
 }
 
 esp_err_t net_save_wifi(const char *ssid, const char *pass) {

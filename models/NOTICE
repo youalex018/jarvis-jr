@@ -1,0 +1,3 @@
+hey_jarvis.tflite is the microWakeWord v2 "Hey Jarvis" INT8 streaming model
+by Kevin Ahrendt, from https://github.com/esphome/micro-wake-word-models
+(Apache License 2.0). See LICENSE in this directory.
