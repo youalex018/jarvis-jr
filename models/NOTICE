@@ -1,3 +1,10 @@
 hey_jarvis.tflite is the microWakeWord v2 "Hey Jarvis" INT8 streaming model
 by Kevin Ahrendt, from https://github.com/esphome/micro-wake-word-models
 (Apache License 2.0). See LICENSE in this directory.
+
+light_on.tflite and light_off.tflite are command models trained with
+train/colab_light_on_off.ipynb (same microWakeWord v2 INT8 streaming
+format). Firmware embeds them when those exact names are present.
+Background clips used in training (AudioSet / FMA) have mixed licenses;
+treat these two files as personal / non-commercial unless you replace
+those datasets and retrain.

@@ -8,5 +8,7 @@ components/esp-tflite-micro/** linguist-vendored
 # Vendored snapshot, not a submodule (see components/tflite_microfrontend/ORIGIN.txt)
 components/tflite_microfrontend/** linguist-vendored
 
-# Generated at CMake configure from models/hey_jarvis.tflite (also gitignored)
+# Generated at CMake configure from models/*.tflite (also gitignored)
 hey_jarvis_model.c linguist-generated
+light_on_model.c linguist-generated
+light_off_model.c linguist-generated

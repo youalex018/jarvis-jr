@@ -12,7 +12,6 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "driver/i2s_std.h"
-#include "driver/gpio.h"
 
 static const char *TAG = "ingest";
 
@@ -34,23 +33,11 @@ static volatile uint32_t s_overrun;
 static volatile uint32_t s_buffers;
 static uint64_t s_noise;
 static uint32_t s_boot_left = VAD_BOOT_BLOCKS;
-static uint32_t s_on_run;
-static uint32_t s_off_run;
-static int s_led_on;
 static uint32_t s_hang_left;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static audio_ingest_stats_t s_stats;
 static int64_t s_prev_wake;
 static bool s_log_enabled = true;
-
-static esp_err_t led_init(void) {
-    gpio_reset_pin(LED_GPIO);
-    esp_err_t err = gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
-    if (err != ESP_OK) {
-        return err; // fail if LED GPIO is not available
-    }
-    return gpio_set_level(LED_GPIO, 0); // Set LED off initially
-}
 
 static bool IRAM_ATTR on_recv(i2s_chan_handle_t handle, i2s_event_data_t *event, void *user_ctx) {
     (void)handle;
@@ -124,30 +111,16 @@ static void ingest_task(void *arg) {
             }
         }
 
+        const bool listening = audio_dsp_listening();
         if (voiced) {
             s_hang_left = VAD_HANGOVER_BLOCKS;
         }
-        if (voiced || s_hang_left > 0) {
+        if (listening || voiced || s_hang_left > 0) {
             (void)audio_dsp_try_submit(samples, n, ac_mean_sq);
-            if (!voiced) {
+            if (!voiced && !listening) {
                 s_hang_left--;
             }
         }
-
-        if (voiced) {
-            s_on_run++;
-            s_off_run = 0;
-            if (s_on_run >= VAD_ON_BLOCKS) {
-                s_led_on = 1;
-            }
-        } else {
-            s_off_run++;
-            s_on_run = 0;
-            if (s_off_run >= VAD_OFF_BLOCKS) {
-                s_led_on = 0;
-            }
-        }
-        gpio_set_level(LED_GPIO, s_led_on);
 
         const int64_t t1 = esp_timer_get_time();
         const uint32_t proc_us = (uint32_t)(t1 - t0);
@@ -177,7 +150,7 @@ static void ingest_task(void *arg) {
         }
         s_stats.noise = s_noise;
         s_stats.voiced = voiced;
-        s_stats.led_on = s_led_on;
+        s_stats.led_on = listening ? 1 : 0;
         proc_max_us = s_stats.proc_max_us;
         period_max_us = s_stats.period_max_us;
         taskEXIT_CRITICAL(&s_lock);
@@ -186,12 +159,12 @@ static void ingest_task(void *arg) {
         if (s_log_enabled && (count % LOG_EVERY_BUFFERS) == 0) {
             ESP_LOGI(TAG,
                      "buf=%" PRIu32 " frames=%u dc=%" PRId32
-                     " ac=%" PRIu64 " noise=%" PRIu64 " voiced=%d"
+                     " ac=%" PRIu64 " noise=%" PRIu64 " voiced=%d listen=%d"
                      " min=%" PRId32 " max=%" PRId32 " ovf=%" PRIu32
                      " hwm_in=%u hwm_dsp=%u qdepth=%u qdrop=%" PRIu32
                      " proc_us=%" PRIu32 "/%" PRIu32
                      " period_us=%" PRIu32 "/%" PRIu32,
-                     count, (unsigned)n, dc, ac_mean_sq, s_noise, voiced,
+                     count, (unsigned)n, dc, ac_mean_sq, s_noise, voiced, (int)listening,
                      min_s, max_s, s_overrun,
                      (unsigned)uxTaskGetStackHighWaterMark(s_ingest_task),
                      (unsigned)uxTaskGetStackHighWaterMark(audio_dsp_task()),
@@ -235,11 +208,6 @@ void audio_ingest_set_log(bool on) {
 }
 
 esp_err_t audio_ingest_start(void) {
-    esp_err_t err = led_init();
-    if (err != ESP_OK) {
-        return err;
-    }
-
     s_dma_sem = xSemaphoreCreateBinary();
     if (s_dma_sem == NULL) {
         return ESP_ERR_NO_MEM;
@@ -249,7 +217,7 @@ esp_err_t audio_ingest_start(void) {
     chan_cfg.dma_desc_num  = AUDIO_DMA_DESC_NUM;
     chan_cfg.dma_frame_num = AUDIO_DMA_FRAME_NUM;
 
-    err = i2s_new_channel(&chan_cfg, NULL, &s_rx);
+    esp_err_t err = i2s_new_channel(&chan_cfg, NULL, &s_rx);
     if (err != ESP_OK) {
         return err;
     }
@@ -306,8 +274,8 @@ esp_err_t audio_ingest_start(void) {
              AUDIO_DMA_DESC_NUM, AUDIO_DMA_FRAME_NUM);
     ESP_LOGI(TAG, "INMP441  BCLK=%d WS=%d SD=%d  (L/R=GND, VDD=3V3)",
              (int)I2S_BCLK_GPIO, (int)I2S_WS_GPIO, (int)I2S_SD_GPIO);
-    ESP_LOGI(TAG, "VAD: ac > %d*noise, LED debounce on=%d off=%d hangover=%d blocks (~32 ms each)",
-             VAD_RATIO_K, VAD_ON_BLOCKS, VAD_OFF_BLOCKS, VAD_HANGOVER_BLOCKS);
-    ESP_LOGI(TAG, "LED GPIO %d on when voiced; bulb follows hey jarvis", (int)LED_GPIO);
+    ESP_LOGI(TAG, "VAD: ac > %d*noise, hangover=%d blocks (~32 ms each); idle gate only",
+             VAD_RATIO_K, VAD_HANGOVER_BLOCKS);
+    ESP_LOGI(TAG, "LED GPIO %d on during Hey Jarvis listen window", (int)LED_GPIO);
     return ESP_OK;
 }

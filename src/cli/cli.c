@@ -99,13 +99,18 @@ static void cmd_stats(void) {
            " proc_us last=%" PRIu32 " max=%" PRIu32 " hwm=%" PRIu32 "\r\n",
            dsp.blocks, dsp.drops, dsp.depth,
            dsp.proc_last_us, dsp.proc_max_us, dsp.stack_hwm);
-    printf("wake   slices=%" PRIu32 " infers=%" PRIu32
+    printf("wake   listen=%" PRIu32 " left_ms=%" PRIu32 " led=%" PRIu32
+           " slices=%" PRIu32 " infers=%" PRIu32
            " infer_us last=%" PRIu32 " max=%" PRIu32
-           " prob=%" PRIu32 " det=%" PRIu32 " rst=%" PRIu32
-           " arena=%" PRIu32 "\r\n",
+           " p_j=%" PRIu32 " p_on=%" PRIu32 " p_off=%" PRIu32
+           " det_j=%" PRIu32 " det_on=%" PRIu32 " det_off=%" PRIu32
+           " tmo=%" PRIu32 " rst=%" PRIu32 " arena=%" PRIu32 "\r\n",
+           dsp.listening, dsp.listen_left_ms, dsp.led,
            dsp.slices, dsp.infers,
            dsp.infer_last_us, dsp.infer_max_us,
-           dsp.prob_last, dsp.detections, dsp.resets, dsp.arena_used);
+           dsp.prob_jarvis, dsp.prob_on, dsp.prob_off,
+           dsp.det_jarvis, dsp.det_on, dsp.det_off,
+           dsp.listen_timeouts, dsp.resets, dsp.arena_used);
     printf("net    state=%d ip=%s rssi=%d wiz=%s sent=%" PRIu32
            " drops=%" PRIu32 " send_err=%" PRIu32 " reconnects=%" PRIu32
            " send_us last=%" PRIu32 " max=%" PRIu32 " hwm=%" PRIu32 "\r\n",

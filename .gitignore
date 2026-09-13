@@ -13,8 +13,10 @@ sdkconfig.*
 !sdkconfig.defaults
 !sdkconfig.defaults.*
 
-# CMake output of components/wake_model/gen_model_c.py from models/hey_jarvis.tflite
+# CMake output of components/wake_model/gen_model_c.py from models/*.tflite
 hey_jarvis_model.c
+light_on_model.c
+light_off_model.c
 
 # Python bytecode
 __pycache__/
@@ -29,3 +31,5 @@ compile_commands.json
 
 # Local scratch (not source)
 temp/
+.ipynb_checkpoints/
+train/output.txt

@@ -2,7 +2,7 @@
 
 ESP-IDF firmware via PlatformIO. Run these in a **new** PowerShell. Active env: `esp32-s3-nano` (`board = arduino_nano_esp32` — Waveshare ESP32-S3-Nano / Arduino Nano ESP32).
 
-On-device **"Hey Jarvis"** (microWakeWord v2 INT8) toggles a local WiZ bulb over UDP. The GPIO LED is a VAD debug indicator, not the actuator. No cloud.
+On-device **"Hey Jarvis"** (microWakeWord v2 INT8) opens a 3 s listen window and lights GPIO 48. **"light on"** / **"light off"** (optional `.tflite`s) set a local WiZ bulb over UDP. The LED stays on until a command is recognized or the window expires. No cloud.
 
 After clone: `git submodule update --init --recursive`. The factory app partition is **4 MB** (`partitions.csv`); TFLM does not fit the default 1 MB app. If the compile runs out of RAM, use `pio run -j 2`.
 
@@ -72,14 +72,32 @@ Expect `CPU Cores: 2` and **non-zero** `External PSRAM` on the Nano.
 
 ---
 
+## Train `light on` / `light off` (Google Colab)
+
+Checked-in `models/light_on.tflite` and `models/light_off.tflite` are the Colab-trained pair used on the desk. Firmware embeds them when those exact names exist. Retrain on **Colab with a GPU**, not this PC, if you want new weights:
+
+1. Open [Google Colab](https://colab.research.google.com/). Runtime → Change runtime type → **T4 GPU**.
+2. File → Upload notebook → `train/colab_light_on_off.ipynb` from this repo.
+3. Runtime → Run all. After the install cell: **Runtime → Restart session**, then run from **Config** downward.
+4. Download `light_on.tflite` and `light_off.tflite`. Copy both into `models/` (exact names).
+5. Close the serial monitor, then `pio run -j 2` and `pio run -t upload`.
+
+Boot must log `light_on` and `light_off`, not `cmd models: none`. CMake only sees new `.tflite` files at configure time; if they were added after a prior build, `pio run -t fullclean` then `pio run -j 2`. Then: Hey Jarvis → LED on → “light on” / “light off” within 3 s → bulb + LED off.
+
+Desk-checked knobs (normal voice): `AUDIO_PCM_GAIN` 4, `VAD_RATIO_K` 3, Jarvis cutoff 230 / window 5, command cutoff 204 / window 3. See `include/wake_model.h`, `include/audio_dsp.h`, `include/audio_ingest.h`.
+
+---
+
 ## First-party, generated, submodule, vendored
 
 | Path | What it is |
 |---|---|
 | `src/`, `include/` | First-party C |
 | `components/wake_model/` (`wake_model.cc`, `gen_model_c.py`) | First-party C++ TFLM wrapper |
-| `models/hey_jarvis.tflite` | Checked-in model binary (source of truth) |
-| `hey_jarvis_model.c` | **Generated** at CMake configure from the `.tflite`; gitignored |
+| `models/hey_jarvis.tflite` | Checked-in wake model (source of truth) |
+| `models/light_on.tflite`, `models/light_off.tflite` | Optional command models; omit to build listen-window-only |
+| `train/colab_light_on_off.ipynb` | Google Colab notebook to train those two models |
+| `hey_jarvis_model.c`, `light_on_model.c`, `light_off_model.c` | **Generated** at CMake configure from the `.tflite`s; gitignored |
 | `components/esp-tflite-micro` | **Git submodule** (`espressif/esp-tflite-micro`, pin `99f49e1` in `.gitmodules`) |
 | `components/tflite_microfrontend/` | **Vendored** TFLM frontend (not a submodule). See `ORIGIN.txt` |
 | `managed_components/`, `dependencies.lock` | **Generated** IDF Component Manager fetch of `esp-nn`; gitignored |
@@ -95,10 +113,8 @@ Jumper **B1 to GND**, tap **RST**, remove the jumper (RGB purple), then flash th
 
 ## What “debug” is on this desk
 
-There is no logic analyzer. Use:
-
-- `pio device monitor` — boot banner, `ingest:` lines, `hey jarvis` detections, `ovf`, min/max
-- On-board LED (`LED_GPIO` in `include/board.h`) — D13 / GPIO 48
+- `pio device monitor` — boot banner, `ingest:` lines, `hey jarvis` / `listen start|end`, `ovf`, min/max
+- On-board LED (`LED_GPIO` in `include/board.h`) — D13 / GPIO 48, **on during the listen window only**
 - Rebuild with extra `ESP_LOGI` in the ingest task if you need a number
 
 GDB (`pio debug`) needs a debug session in Cursor/VS Code. The S3 has built-in USB JTAG; it is not required for bring-up. Prefer serial logs until ingest is proven.

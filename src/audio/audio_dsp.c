@@ -1,12 +1,14 @@
-// DSP task: microfrontend + hey_jarvis INT8 wake word on voiced blocks
+// DSP task: microfrontend + hey_jarvis, then optional light on/off in a listen window
 #include "audio_dsp.h"
 #include "audio_ingest.h"
+#include "board.h"
 #include "net.h"
 #include "wake_model.h"
 
 #include <inttypes.h>
 #include <limits.h>
 #include <string.h>
+#include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -24,6 +26,15 @@ typedef struct {
     int16_t pcm[AUDIO_DMA_FRAME_NUM];
 } audio_block_t;
 
+typedef struct {
+    int8_t ring[WAKE_MAX_STRIDE * WAKE_FEATURE_SIZE];
+    int ring_n;
+    uint8_t window[WAKE_SLIDING_WINDOW];
+    size_t win_i;
+    int16_t ignore;
+    uint8_t prob_last;
+} det_t;
+
 static audio_block_t s_pool[AUDIO_DSP_QUEUE_LEN];
 static QueueHandle_t s_free;
 static QueueHandle_t s_filled;
@@ -37,25 +48,27 @@ static uint32_t s_slices;
 static uint32_t s_infers;
 static uint32_t s_infer_last_us;
 static uint32_t s_infer_max_us;
-static uint32_t s_prob_last;
-static uint32_t s_detections;
+static uint32_t s_det_jarvis;
+static uint32_t s_det_on;
+static uint32_t s_det_off;
+static uint32_t s_listen_timeouts;
 static uint32_t s_resets;
 static uint32_t s_arena_used;
+static uint32_t s_prob_jarvis;
+static uint32_t s_prob_on;
+static uint32_t s_prob_off;
 
 static struct FrontendState s_frontend;
-static int8_t s_feat_ring[WAKE_MAX_STRIDE * WAKE_FEATURE_SIZE];
-static int s_ring_n;
-static uint8_t s_window[WAKE_SLIDING_WINDOW];
-static size_t s_win_i;
-static int16_t s_ignore;
+static det_t s_det[WAKE_SLOT_COUNT];
 static int64_t s_last_block_us;
-static uint8_t *s_arena;
+static volatile bool s_listening;
+static int64_t s_listen_deadline_us;
+static int s_led_on;
 
-#if WAKE_ARENA_IN_PSRAM
-#define WAKE_ARENA_CAPS (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
-#else
-#define WAKE_ARENA_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
-#endif
+static void led_set(int on) {
+    s_led_on = on ? 1 : 0;
+    gpio_set_level(LED_GPIO, s_led_on);
+}
 
 static void quantize_feature(const uint16_t *in, size_t n, int8_t *out) {
     for (size_t i = 0; i < n; i++) {
@@ -71,62 +84,101 @@ static void quantize_feature(const uint16_t *in, size_t n, int8_t *out) {
     }
 }
 
-static void reset_detector(int16_t ignore) {
-    memset(s_feat_ring, 0, sizeof(s_feat_ring));
-    s_ring_n = 0;
-    memset(s_window, 0, sizeof(s_window));
-    s_win_i = 0;
-    s_ignore = ignore;
-    (void)wake_model_reset();
-    FrontendReset(&s_frontend);
+static void reset_slot(wake_slot_t slot, int16_t ignore) {
+    det_t *d = &s_det[slot];
+    memset(d->ring, 0, sizeof(d->ring));
+    d->ring_n = 0;
+    memset(d->window, 0, sizeof(d->window));
+    d->win_i = 0;
+    d->ignore = ignore;
+    d->prob_last = 0;
+    if (wake_model_ready(slot)) {
+        (void)wake_model_reset(slot);
+    }
 }
 
-static bool window_hit(void) {
+static uint8_t slot_cutoff(wake_slot_t slot) {
+    return (slot == WAKE_SLOT_JARVIS) ? WAKE_PROB_CUTOFF : WAKE_CMD_PROB_CUTOFF;
+}
+
+static size_t slot_window_n(wake_slot_t slot) {
+    return (slot == WAKE_SLOT_JARVIS) ? WAKE_SLIDING_WINDOW : WAKE_CMD_SLIDING_WINDOW;
+}
+
+static bool window_hit(const det_t *d, wake_slot_t slot) {
+    const size_t n = slot_window_n(slot);
     uint32_t sum = 0;
-    for (size_t i = 0; i < WAKE_SLIDING_WINDOW; i++) {
-        sum += s_window[i];
+    for (size_t i = 0; i < n; i++) {
+        sum += d->window[i];
     }
-    return sum > ((uint32_t)WAKE_PROB_CUTOFF * WAKE_SLIDING_WINDOW);
+    return sum >= ((uint32_t)slot_cutoff(slot) * n);
 }
 
-static void process_feature(const int8_t feat[WAKE_FEATURE_SIZE]) {
-    const int stride = wake_model_stride();
-    if (stride <= 0 || stride > WAKE_MAX_STRIDE) {
-        return;
+static void enter_listen(int64_t now_us) {
+    s_listening = true;
+    s_listen_deadline_us = now_us + WAKE_LISTEN_US;
+    led_set(1);
+    reset_slot(WAKE_SLOT_LIGHT_ON, -WAKE_WARMUP_SLICES);
+    reset_slot(WAKE_SLOT_LIGHT_OFF, -WAKE_WARMUP_SLICES);
+    ESP_LOGI(TAG, "listen start %d ms", (int)(WAKE_LISTEN_US / 1000));
+}
+
+static void exit_listen(const char *why) {
+    s_listening = false;
+    s_listen_deadline_us = 0;
+    led_set(0);
+    reset_slot(WAKE_SLOT_JARVIS, -WAKE_COOLDOWN_SLICES);
+    ESP_LOGI(TAG, "listen end %s", why);
+}
+
+static bool feed_slot(wake_slot_t slot, const int8_t feat[WAKE_FEATURE_SIZE]) {
+    if (!wake_model_ready(slot)) {
+        return false;
     }
 
-    memcpy(&s_feat_ring[s_ring_n * WAKE_FEATURE_SIZE], feat, WAKE_FEATURE_SIZE);
-    s_ring_n++;
+    const int stride = wake_model_stride(slot);
+    if (stride <= 0 || stride > WAKE_MAX_STRIDE) {
+        return false;
+    }
 
-    uint8_t last_prob;
-    taskENTER_CRITICAL(&s_lock);
-    s_slices++;
-    last_prob = (uint8_t)s_prob_last;
-    taskEXIT_CRITICAL(&s_lock);
+    det_t *d = &s_det[slot];
+    memcpy(&d->ring[d->ring_n * WAKE_FEATURE_SIZE], feat, WAKE_FEATURE_SIZE);
+    d->ring_n++;
 
-    if (s_ring_n >= stride) {
+    uint8_t last_prob = d->prob_last;
+    bool hit = false;
+    uint32_t infer_us = 0;
+
+    if (d->ring_n >= stride) {
         uint8_t prob = 0;
         const int64_t t0 = esp_timer_get_time();
-        const esp_err_t err = wake_model_invoke(s_feat_ring, &prob);
-        const uint32_t infer_us = (uint32_t)(esp_timer_get_time() - t0);
-        s_ring_n = 0;
+        const esp_err_t err = wake_model_invoke(slot, d->ring, &prob);
+        infer_us = (uint32_t)(esp_timer_get_time() - t0);
+        d->ring_n = 0;
 
-        bool hit = false;
         if (err == ESP_OK) {
-            s_win_i++;
-            if (s_win_i == WAKE_SLIDING_WINDOW) {
-                s_win_i = 0;
+            const size_t win_n = slot_window_n(slot);
+            d->win_i++;
+            if (d->win_i == win_n) {
+                d->win_i = 0;
             }
-            s_window[s_win_i] = prob;
+            d->window[d->win_i] = prob;
+            d->prob_last = prob;
             last_prob = prob;
-            if (s_ignore >= 0 && window_hit()) {
+            if (d->ignore >= 0 && window_hit(d, slot)) {
                 hit = true;
-                memset(s_window, 0, sizeof(s_window));
-                s_ignore = -WAKE_COOLDOWN_SLICES;
+                memset(d->window, 0, sizeof(d->window));
+                d->ignore = -WAKE_COOLDOWN_SLICES;
             }
         }
 
-        uint32_t detections = 0;
+        uint32_t *prob_stat = &s_prob_jarvis;
+        if (slot == WAKE_SLOT_LIGHT_ON) {
+            prob_stat = &s_prob_on;
+        } else if (slot == WAKE_SLOT_LIGHT_OFF) {
+            prob_stat = &s_prob_off;
+        }
+
         taskENTER_CRITICAL(&s_lock);
         s_infers++;
         s_infer_last_us = infer_us;
@@ -134,23 +186,59 @@ static void process_feature(const int8_t feat[WAKE_FEATURE_SIZE]) {
             s_infer_max_us = infer_us;
         }
         if (err == ESP_OK) {
-            s_prob_last = prob;
-            if (hit) {
-                s_detections++;
-            }
+            *prob_stat = prob;
         }
-        detections = s_detections;
         taskEXIT_CRITICAL(&s_lock);
-
-        if (hit) {
-            const bool on = net_toggle_light();
-            ESP_LOGI(TAG, "hey jarvis det=%" PRIu32 " prob=%u light=%s infer_us=%" PRIu32,
-                     detections, (unsigned)prob, on ? "on" : "off", infer_us);
-        }
     }
 
-    if (last_prob < WAKE_PROB_CUTOFF && s_ignore < 0) {
-        s_ignore++;
+    if (last_prob < slot_cutoff(slot) && d->ignore < 0) {
+        d->ignore++;
+    }
+    return hit;
+}
+
+static void process_feature(const int8_t feat[WAKE_FEATURE_SIZE], int64_t now_us) {
+    taskENTER_CRITICAL(&s_lock);
+    s_slices++;
+    taskEXIT_CRITICAL(&s_lock);
+
+    if (s_listening) {
+        if (feed_slot(WAKE_SLOT_LIGHT_ON, feat)) {
+            uint32_t n;
+            taskENTER_CRITICAL(&s_lock);
+            s_det_on++;
+            n = s_det_on;
+            taskEXIT_CRITICAL(&s_lock);
+            net_set_light(true);
+            ESP_LOGI(TAG, "light on det=%" PRIu32 " prob=%u", n,
+                     (unsigned)s_det[WAKE_SLOT_LIGHT_ON].prob_last);
+            exit_listen("light_on");
+            return;
+        }
+        if (feed_slot(WAKE_SLOT_LIGHT_OFF, feat)) {
+            uint32_t n;
+            taskENTER_CRITICAL(&s_lock);
+            s_det_off++;
+            n = s_det_off;
+            taskEXIT_CRITICAL(&s_lock);
+            net_set_light(false);
+            ESP_LOGI(TAG, "light off det=%" PRIu32 " prob=%u", n,
+                     (unsigned)s_det[WAKE_SLOT_LIGHT_OFF].prob_last);
+            exit_listen("light_off");
+            return;
+        }
+        return;
+    }
+
+    if (feed_slot(WAKE_SLOT_JARVIS, feat)) {
+        uint32_t n;
+        taskENTER_CRITICAL(&s_lock);
+        s_det_jarvis++;
+        n = s_det_jarvis;
+        taskEXIT_CRITICAL(&s_lock);
+        ESP_LOGI(TAG, "hey jarvis det=%" PRIu32 " prob=%u", n,
+                 (unsigned)s_det[WAKE_SLOT_JARVIS].prob_last);
+        enter_listen(now_us);
     }
 }
 
@@ -164,8 +252,16 @@ static void dsp_task(void *arg) {
         }
 
         const int64_t t0 = esp_timer_get_time();
-        if (s_last_block_us != 0 && (t0 - s_last_block_us) > WAKE_GAP_US) {
-            reset_detector(-WAKE_WARMUP_SLICES);
+        if (s_listening) {
+            if (t0 >= s_listen_deadline_us) {
+                taskENTER_CRITICAL(&s_lock);
+                s_listen_timeouts++;
+                taskEXIT_CRITICAL(&s_lock);
+                exit_listen("timeout");
+            }
+        } else if (s_last_block_us != 0 && (t0 - s_last_block_us) > WAKE_GAP_US) {
+            reset_slot(WAKE_SLOT_JARVIS, -WAKE_WARMUP_SLICES);
+            FrontendReset(&s_frontend);
             taskENTER_CRITICAL(&s_lock);
             s_resets++;
             taskEXIT_CRITICAL(&s_lock);
@@ -193,7 +289,7 @@ static void dsp_task(void *arg) {
             if (n < WAKE_FEATURE_SIZE) {
                 memset(&feat[n], INT8_MIN, WAKE_FEATURE_SIZE - n);
             }
-            process_feature(feat);
+            process_feature(feat, t0);
         }
 
         const uint32_t proc_us = (uint32_t)(esp_timer_get_time() - t0);
@@ -249,31 +345,29 @@ esp_err_t audio_dsp_start(void) {
         }
     }
 
-    const size_t heap_before = heap_caps_get_free_size(WAKE_ARENA_CAPS);
-    s_arena = (uint8_t *)heap_caps_aligned_alloc(16, WAKE_ARENA_SIZE, WAKE_ARENA_CAPS);
-    if (s_arena == NULL) {
-        ESP_LOGE(TAG, "arena alloc %u failed caps=0x%x", (unsigned)WAKE_ARENA_SIZE,
-                 (unsigned)WAKE_ARENA_CAPS);
-        return ESP_ERR_NO_MEM;
-    }
-
-    esp_err_t err = wake_model_init(s_arena, WAKE_ARENA_SIZE);
+    esp_err_t err = wake_model_init();
     if (err != ESP_OK) {
         return err;
     }
-    s_arena_used = (uint32_t)wake_model_arena_used();
-    s_ignore = -WAKE_WARMUP_SLICES;
+    s_arena_used = (uint32_t)wake_model_arena_used(WAKE_SLOT_JARVIS);
+    reset_slot(WAKE_SLOT_JARVIS, -WAKE_WARMUP_SLICES);
+
+    gpio_reset_pin(LED_GPIO);
+    gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
+    led_set(0);
 
     if (!frontend_init()) {
         return ESP_FAIL;
     }
 
-    const size_t heap_after = heap_caps_get_free_size(WAKE_ARENA_CAPS);
-    ESP_LOGI(TAG, "arena %s size=%u used=%u heap_delta=%d model=%uB",
-             WAKE_ARENA_IN_PSRAM ? "psram" : "internal",
-             (unsigned)WAKE_ARENA_SIZE, (unsigned)s_arena_used,
-             (int)heap_before - (int)heap_after,
-             (unsigned)wake_model_bytes());
+    ESP_LOGI(TAG,
+             "jarvis arena_used=%u model=%uB queue len=%u listen_ms=%d "
+             "cut_j=%u/%u cut_cmd=%u/%u pcm_gain=%d",
+             (unsigned)s_arena_used, (unsigned)wake_model_bytes(WAKE_SLOT_JARVIS),
+             (unsigned)AUDIO_DSP_QUEUE_LEN, (int)(WAKE_LISTEN_US / 1000),
+             (unsigned)WAKE_PROB_CUTOFF, (unsigned)WAKE_SLIDING_WINDOW,
+             (unsigned)WAKE_CMD_PROB_CUTOFF, (unsigned)WAKE_CMD_SLIDING_WINDOW,
+             AUDIO_PCM_GAIN);
 
     BaseType_t ok = xTaskCreatePinnedToCore(dsp_task, "dsp", DSP_TASK_STACK,
                                             NULL, DSP_TASK_PRIO, &s_dsp_task,
@@ -281,8 +375,6 @@ esp_err_t audio_dsp_start(void) {
     if (ok != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
-
-    ESP_LOGI(TAG, "wake hey_jarvis queue len=%u", (unsigned)AUDIO_DSP_QUEUE_LEN);
     return ESP_OK;
 }
 
@@ -303,8 +395,13 @@ bool audio_dsp_try_submit(const int32_t *dma_samples, size_t n, uint64_t ac_mean
     block->n = (uint32_t)n;
     block->ac_mean_sq = ac_mean_sq;
     for (size_t i = 0; i < n; i++) {
-        const int32_t s = dma_samples[i] >> 8;
-        block->pcm[i] = (int16_t)(s >> 8);
+        int32_t s = (dma_samples[i] >> 16) * AUDIO_PCM_GAIN;
+        if (s > INT16_MAX) {
+            s = INT16_MAX;
+        } else if (s < INT16_MIN) {
+            s = INT16_MIN;
+        }
+        block->pcm[i] = (int16_t)s;
     }
 
     if (xQueueSend(s_filled, &block, 0) != pdTRUE) {
@@ -313,6 +410,10 @@ bool audio_dsp_try_submit(const int32_t *dma_samples, size_t n, uint64_t ac_mean
         return false;
     }
     return true;
+}
+
+bool audio_dsp_listening(void) {
+    return s_listening;
 }
 
 uint32_t audio_dsp_drops(void) {
@@ -334,6 +435,11 @@ void audio_dsp_get_stats(audio_dsp_stats_t *out) {
     if (out == NULL) {
         return;
     }
+    const int64_t now = esp_timer_get_time();
+    uint32_t left_ms = 0;
+    if (s_listening && s_listen_deadline_us > now) {
+        left_ms = (uint32_t)((s_listen_deadline_us - now) / 1000);
+    }
     taskENTER_CRITICAL(&s_lock);
     out->blocks = s_blocks;
     out->proc_last_us = s_proc_last_us;
@@ -342,11 +448,19 @@ void audio_dsp_get_stats(audio_dsp_stats_t *out) {
     out->infers = s_infers;
     out->infer_last_us = s_infer_last_us;
     out->infer_max_us = s_infer_max_us;
-    out->prob_last = s_prob_last;
-    out->detections = s_detections;
+    out->det_jarvis = s_det_jarvis;
+    out->det_on = s_det_on;
+    out->det_off = s_det_off;
+    out->listen_timeouts = s_listen_timeouts;
+    out->prob_jarvis = s_prob_jarvis;
+    out->prob_on = s_prob_on;
+    out->prob_off = s_prob_off;
     out->resets = s_resets;
     out->arena_used = s_arena_used;
     taskEXIT_CRITICAL(&s_lock);
+    out->listening = s_listening ? 1 : 0;
+    out->listen_left_ms = left_ms;
+    out->led = (uint32_t)s_led_on;
     out->drops = s_drops;
     out->depth = (uint32_t)audio_dsp_queue_waiting();
     out->stack_hwm = (uint32_t)uxTaskGetStackHighWaterMark(s_dsp_task);
@@ -362,8 +476,13 @@ void audio_dsp_reset_stats(void) {
     s_infers = 0;
     s_infer_last_us = 0;
     s_infer_max_us = 0;
-    s_prob_last = 0;
-    s_detections = 0;
+    s_det_jarvis = 0;
+    s_det_on = 0;
+    s_det_off = 0;
+    s_listen_timeouts = 0;
+    s_prob_jarvis = 0;
+    s_prob_on = 0;
+    s_prob_off = 0;
     s_resets = 0;
     taskEXIT_CRITICAL(&s_lock);
 }
