@@ -12,19 +12,14 @@
 #define VAD_BOOT_SKIP_BLOCKS 16   // ~0.5 s: ignore I2S clock-start transient before learning
 #define VAD_BOOT_BLOCKS 16        // ~0.5 s after that: learn noise
 #define VAD_HANGOVER_BLOCKS 8     // ~256 ms extra voiced queue after speech
+#define VAD_GLITCH_K 4096         // preserve loud speech; reject only extreme DMA junk
 
 #define DOZE_AFTER_MS 30000       // quiet time before first doze
 #define DOZE_SLEEP_MS 500         // I2S off; chip may light-sleep
 #define DOZE_FLUSH_BLOCKS 2       // drop first DMA after clocks restart
-#define DOZE_DISCARD_BLOCKS 12    // time-based ignore of clock-start AC
-#define DOZE_SETTLED_K 2          // ac below this * pre-doze floor => restart tail gone
-#define DOZE_SETTLE_QUIET 4       // near-floor blocks (hysteresis, not strict consecutive)
-#define DOZE_SETTLE_MAX 48        // give up this cycle after ~1.5 s
-#define DOZE_PROBE_BLOCKS 32      // VAD after floor (~1 s)
-#define DOZE_VOICE_BLOCKS 6       // in-band hits within one probe window to leave doze (quiet room ~2, speech 7-9)
-#define DOZE_ARM_BLOCKS 12        // awake VAD hits in the last 32 blocks (~1 s) to reset the 30 s clock
-#define DOZE_PROBE_RATIO_K 3      // vs pre-doze floor; must be > DOZE_SETTLED_K
-#define DOZE_GLITCH_K 16          // above this * floor is DMA junk, not speech
+#define DOZE_PROBE_MAX_BLOCKS 64  // ~2 s DSP listen after the two-block flush
+#define DOZE_PROBE_RATIO_K 3      // diagnostic in-band vs pre-doze floor
+#define DOZE_PROBE_GLITCH_K 4096  // probe-only: preserve loud speech; skip extreme DMA junk
 
 typedef struct {
     uint32_t blocks;         // total DMA blocks processed
@@ -44,7 +39,8 @@ typedef struct {
     uint32_t hang;           // VAD hangover blocks left (DSP submit, not doze)
     uint32_t doze_cycles;    // times ingest entered doze
     uint32_t doze_probes;    // VAD blocks processed while probing
-    uint32_t doze_wakes;     // probe heard voice and returned to awake
+    uint32_t doze_dsp_blocks; // probe blocks submitted to DSP
+    uint32_t doze_wakes;     // wake word detected during probe
     uint32_t stack_hwm;      // bytes remaining
 } audio_ingest_stats_t;
 
@@ -52,4 +48,4 @@ esp_err_t audio_ingest_start(void);
 void audio_ingest_get_stats(audio_ingest_stats_t *out);
 void audio_ingest_reset_stats(void); // zero max/min/overrun/totals; keep noise + VAD + dozing
 void audio_ingest_set_log(bool on);  // 1 Hz ESP_LOGI on/off
-void audio_ingest_set_doze(bool on); // idle I2S-off / light-sleep duty cycle
+void audio_ingest_set_doze(bool on); // on requests entry; off disables duty-cycle doze

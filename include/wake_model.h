@@ -13,7 +13,7 @@
 #define WAKE_ARENA_IN_PSRAM 0     // 1 = PSRAM for hey_jarvis; internal is default
 #define WAKE_SLIDING_WINDOW 5
 #define WAKE_CMD_SLIDING_WINDOW 3 // shorter phrases than Hey Jarvis
-#define WAKE_PROB_CUTOFF 230      // 0.90 * 255; official hey_jarvis is 0.97
+#define WAKE_PROB_CUTOFF 220      // 0.86 * 255; observed doze near-misses peak at 225
 #define WAKE_CMD_PROB_CUTOFF 204  // 0.80 * 255; listen window only
 #define WAKE_WARMUP_SLICES 20     // VAD-gated; ESPHome uses 100 on a raw stream
 #define WAKE_COOLDOWN_SLICES 100

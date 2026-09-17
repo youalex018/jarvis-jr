@@ -183,11 +183,11 @@ The firmware never calls `esp_light_sleep_start()` itself. Light sleep is entere
 
 While I2S is enabled, the IDF I2S driver holds `ESP_PM_APB_FREQ_MAX`, which keeps the PLL up and **blocks light sleep**. That is required: S3 light sleep clock-gates I2S/GDMA, so the mic cannot stream through sleep.
 
-After `DOZE_AFTER_MS` (30 s) without **sustained** VAD, ingest **disables** the I2S channel, `vTaskDelay`s `DOZE_SLEEP_MS` (500 ms), then re-enables. Clock-start AC is tens of times the quiet floor, then a ~3× tail that looks like speech if VAD runs immediately. After a timed discard, ingest waits until AC is below `DOZE_SETTLED_K` (2) × the pre-doze floor (`DOZE_SETTLE_QUIET` near-floor blocks; one in-band blip decrements, it does not zero the run; glitches are skipped). Then ~1 s of VAD. `DOZE_VOICE_BLOCKS` (6) in-band hits anywhere in that window leave doze; they are **not** required to be consecutive, because syllable gaps in “Hey Jarvis” drop below K×floor every few blocks (a spoken probe logs `hits=7–9/32`, a quiet room `hits=0–2/32`). Probe audio is not submitted to DSP. Settle timeout → stay in doze.
+After `DOZE_AFTER_MS` (30 s) without **sustained** VAD, ingest **disables** the I2S channel, `vTaskDelay`s `DOZE_SLEEP_MS` (500 ms), then re-enables. It drops only `DOZE_FLUSH_BLOCKS` (2, ~64 ms) of invalid clock-start DMA, then listens for `DOZE_PROBE_MAX_BLOCKS` (~2 s). A longer timed discard was removed because it could cut “Hey” off the phrase. Probe blocks below the high `DOZE_PROBE_GLITCH_K` ceiling are submitted to DSP. Both awake and probe glitch ceilings preserve loud speech; the former 16× cutoff could classify valid speech as DMA junk when the learned floor was low. There is **no settle wait**: “Hey Jarvis” has syllable gaps below 2× floor, so settle still completed and the phrase never reached the model. The restart tail is fed to the model, which rejects it. Each probe arms DSP to reset Jarvis with no warmup (on the DSP task, so the interpreter is not reset from ingest). Doze exits only when the wake-word model fires (`audio_dsp_listening()`). `doze probe` `hits` are diagnostic; `skip` counts extreme blocks, `p_j` is last Jarvis probability, `p_max` is the peak during that probe, and `inf`/`sl` are inferences and feature slices. After the probe, ingest yields until DSP is idle.
 
-VAD hangover still feeds DSP so a pause inside “Hey Jarvis” is not dropped. It does **not** gate doze. The 30 s clock (`quiet_ms`) resets when DSP is in its listen window (wake word fired), or on a **voiced** block when `DOZE_ARM_BLOCKS` (12) of the last 32 blocks (~1 s) were VAD hits. Stamping on every block while the window was full left `quiet_ms=0` for a second after the room went quiet. DMA glitches do not count. A successful “Hey Jarvis” always resets via the listen window; a short utterance that does not reach 12 hits will not.
+VAD hangover still feeds DSP so a pause inside “Hey Jarvis” is not dropped. It does **not** gate doze or reset its clock. The 30 s clock (`quiet_ms`) resets only when DSP is in its listen window (the wake word fired); magnitude VAD also fires on unnoticed room noise and I2S tails. Doze wake explicitly stamps the same clock before returning to awake.
 
-Knobs: `include/audio_ingest.h` (`DOZE_AFTER_MS`, `DOZE_SLEEP_MS`, `DOZE_SETTLED_K`, `DOZE_ARM_BLOCKS`, `DOZE_GLITCH_K`).
+Knobs: `include/audio_ingest.h` (`DOZE_AFTER_MS`, `DOZE_SLEEP_MS`, `DOZE_FLUSH_BLOCKS`, `DOZE_PROBE_MAX_BLOCKS`, `DOZE_PROBE_GLITCH_K`, `VAD_GLITCH_K`).
 
 `stats` `doze_en` is the `pm doze on|off` switch. `dozing` is 1 only while I2S is actually stopped. `quiet_ms` is the doze clock; it should climb toward 30000 in a quiet room.
 
@@ -205,7 +205,7 @@ Do not quote milliamp numbers until they are measured on the board.
 
 Wi-Fi uses `WIFI_PS_MIN_MODEM`, so the chip still wakes on DTIM beacons. Sleep savings are bounded by the AP beacon interval. If UDP to the bulb gets flaky, the knob is `NET_WIFI_PS` in `include/net.h`.
 
-The first **Hey Jarvis** after a long silence can land inside a sleep gap or the settle window and be missed. Repeat once during a probe (`doze probe` lines), or tune `DOZE_SLEEP_MS` / `DOZE_PROBE_BLOCKS` before touching VAD or model cutoffs.
+The first **Hey Jarvis** after a long silence can land inside the 500 ms sleep or the ~64 ms DMA flush and be missed. Repeat once during a probe (`doze probe` lines). Tune `DOZE_SLEEP_MS` / `DOZE_FLUSH_BLOCKS` / `DOZE_PROBE_MAX_BLOCKS` before touching VAD or model cutoffs.
 
 ## Wi-Fi and WiZ
 
@@ -233,7 +233,7 @@ USB Serial/JTAG driver + `usb_serial_jtag_vfs_use_driver()`, unbuffered stdout. 
 | `log on\|off` | 1 Hz ingest `ESP_LOGI` |
 | `reset` | Zero ingest/dsp/net counters (keep VAD floor and dozing flag) |
 | `pm` | PM lock table, mode time, `light_sleep_counts` |
-| `pm doze on\|off` | Enable/disable ingest doze |
+| `pm doze on\|off` | Enter doze on the next eligible audio block / disable doze |
 | `wifi <ssid> <pass>` | Save STA creds in NVS; reboot to apply |
 | `wiz <ip>` | Save bulb IPv4 (applies without reboot) |
 | `wiz on\|off` | Enqueue `setPilot` now |
@@ -249,8 +249,9 @@ Tune these before retraining. If the bulb flips on TV/noise **inside** the 3 s w
 | Knob | File | Default | Why |
 |---|---|---|---|
 | `VAD_RATIO_K` | `include/audio_ingest.h` | 3 | Idle “Hey Jarvis” at conversational level |
+| `VAD_GLITCH_K` | same | 4096 | Preserve loud awake speech; reject only extreme DMA junk |
 | `AUDIO_PCM_GAIN` | `include/audio_dsp.h` | 4 (saturating) | INMP441 conversational level vs synthetic training clips |
-| `WAKE_PROB_CUTOFF` | `include/wake_model.h` | 230 (~0.90; official hey_jarvis is 247 / 0.97) | Slightly easier wake |
+| `WAKE_PROB_CUTOFF` | `include/wake_model.h` | 220 (~0.86; official hey_jarvis is 247 / 0.97) | Accept observed doze near-misses at 225 |
 | `WAKE_SLIDING_WINDOW` | same | 5 | Jarvis |
 | `WAKE_CMD_PROB_CUTOFF` | same | 204 (~0.80) | Listen window only; false accepts are cheaper |
 | `WAKE_CMD_SLIDING_WINDOW` | same | 3 | “light on/off” peaks are shorter |
@@ -258,15 +259,9 @@ Tune these before retraining. If the bulb flips on TV/noise **inside** the 3 s w
 | `DOZE_AFTER_MS` | `include/audio_ingest.h` | 30000 | Quiet time before I2S-off |
 | `DOZE_SLEEP_MS` | same | 500 | I2S off; chip may light-sleep |
 | `DOZE_FLUSH_BLOCKS` | same | 2 | Drop first DMA after re-enable |
-| `DOZE_DISCARD_BLOCKS` | same | 12 | Time-based ignore of clock-start AC |
-| `DOZE_SETTLED_K` | same | 2 | Restart tail gone when `ac < 2*floor` |
-| `DOZE_SETTLE_QUIET` | same | 4 | Near-floor blocks (hysteresis) |
-| `DOZE_SETTLE_MAX` | same | 48 | ~1.5 s; then stay in doze |
-| `DOZE_PROBE_BLOCKS` | same | 32 | ~1 s VAD after floor |
-| `DOZE_VOICE_BLOCKS` | same | 6 | In-band hits per probe window to leave doze (not consecutive) |
-| `DOZE_ARM_BLOCKS` | same | 12 | Awake VAD hits in the last ~1 s to reset `quiet_ms` (stamp on voiced only) |
-| `DOZE_PROBE_RATIO_K` | same | 3 | Must be > `DOZE_SETTLED_K` |
-| `DOZE_GLITCH_K` | same | 16 | Above this × floor is ignored DMA junk |
+| `DOZE_PROBE_MAX_BLOCKS` | same | 64 | ~2 s DSP listen after the two-block flush |
+| `DOZE_PROBE_RATIO_K` | same | 3 | Diagnostic in-band hits vs pre-doze floor |
+| `DOZE_PROBE_GLITCH_K` | same | 4096 | Probe-only ceiling: preserve loud speech, skip extreme DMA junk |
 
 ## Training command models
 

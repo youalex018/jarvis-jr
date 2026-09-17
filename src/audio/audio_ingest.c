@@ -39,10 +39,10 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static audio_ingest_stats_t s_stats;
 static int64_t s_prev_wake;
 static int64_t s_last_voice_us;
-static uint32_t s_vad_hist;      // 1 bit per block, last 32 blocks (~1 s); popcount = recent VAD hits
 static uint64_t s_probe_noise;
 static bool s_log_enabled = true;
 static volatile bool s_doze_enabled = true;
+static volatile bool s_doze_now;
 
 static bool IRAM_ATTR on_recv(i2s_chan_handle_t handle, i2s_event_data_t *event, void *user_ctx) {
     (void)handle;
@@ -165,7 +165,7 @@ static int process_block(const int32_t *samples, size_t n) {
             s_last_voice_us = t0; // start quiet timer after boot learn
             ESP_LOGI(TAG, "VAD floor learned=%" PRIu64, s_noise);
         }
-    } else if (vad_against(ac_mean_sq, s_noise, DOZE_GLITCH_K)) {
+    } else if (vad_against(ac_mean_sq, s_noise, VAD_GLITCH_K)) {
         voiced = 0; // DMA junk: neither voice nor a floor sample
     } else {
         voiced = vad_against(ac_mean_sq, s_noise, VAD_RATIO_K);
@@ -174,15 +174,11 @@ static int process_block(const int32_t *samples, size_t n) {
         }
     }
 
-    // Doze clock. Count VAD hits over the last ~1 s (speech is gappy at
-    // 32 ms). Only stamp on this block if it is voiced, otherwise leftover
-    // bits in the window keep quiet_ms at 0 after the room has gone quiet.
-    // Threshold is above typical room-noise density (~2–6/32) and below
-    // sustained talk. A successful wake word always stamps via listen.
-    s_vad_hist = (s_vad_hist << 1) | (voiced ? 1u : 0u);
+    // Only a wake-word/listen event resets the doze clock. Magnitude VAD
+    // also fires on unnoticed room noise and I2S tails, so it is not a
+    // reliable signal that the user interacted with the device.
     const bool listening = audio_dsp_listening();
-    if (listening ||
-        (voiced && (int)__builtin_popcount(s_vad_hist) >= DOZE_ARM_BLOCKS)) {
+    if (listening) {
         s_last_voice_us = t0;
     }
 
@@ -266,7 +262,6 @@ static void run_doze(void) {
     }
     s_probe_noise = s_noise;
     s_hang_left = 0;
-    s_vad_hist = 0;
     taskENTER_CRITICAL(&s_lock);
     s_stats.dozing = 1;
     s_stats.doze_cycles++;
@@ -284,7 +279,7 @@ static void run_doze(void) {
         }
 
         uint64_t last_ac = 0;
-        for (uint32_t i = 0; i < DOZE_FLUSH_BLOCKS + DOZE_DISCARD_BLOCKS; i++) {
+        for (uint32_t i = 0; i < DOZE_FLUSH_BLOCKS; i++) {
             const int32_t *samples;
             size_t n;
             if (!wait_dma_block(&samples, &n)) {
@@ -292,53 +287,25 @@ static void run_doze(void) {
             }
         }
 
-        // Restart tail sits in the speech band (~3x floor) after discard.
-        // Wait until energy is near the pre-doze floor, with hysteresis so
-        // single 2–16x blips do not wipe progress. Do not VAD until then.
-        uint32_t quiet_run = 0;
-        int settled = 0;
-        for (uint32_t i = 0; i < DOZE_SETTLE_MAX; i++) {
-            const int32_t *samples;
-            size_t n;
-            if (!wait_dma_block(&samples, &n)) {
-                continue;
-            }
-            last_ac = block_ac_mean_sq(samples, n, NULL, NULL, NULL);
-            if (vad_against(last_ac, s_probe_noise, DOZE_GLITCH_K)) {
-                continue;
-            }
-            if (!vad_against(last_ac, s_probe_noise, DOZE_SETTLED_K)) {
-                quiet_run++;
-                if (quiet_run >= DOZE_SETTLE_QUIET) {
-                    settled = 1;
-                    break;
-                }
-            } else if (quiet_run > 0) {
-                quiet_run--;
-            }
-        }
-        if (!settled) {
-            ESP_LOGI(TAG, "doze settle timeout ac=%" PRIu64 " floor=%" PRIu64,
-                     last_ac, s_probe_noise);
-            if (!s_doze_enabled) {
-                break;
-            }
-            if (!i2s_stop_for_doze()) {
-                taskENTER_CRITICAL(&s_lock);
-                s_stats.dozing = 0;
-                taskEXIT_CRITICAL(&s_lock);
-                return;
-            }
-            continue;
-        }
-
-        // Speech is not continuous at 32 ms: syllable gaps drop below K*floor.
-        // Count in-band hits over the window; do not require them consecutive.
+        // Drop only the first invalid DMA blocks, then listen. A timed
+        // discard can remove "Hey" and leave only "Jarvis" for the model.
+        // The model rejects the restart tail; only extreme junk is skipped.
+        audio_dsp_begin_probe();
+        audio_dsp_stats_t dsp0;
+        audio_dsp_get_stats(&dsp0);
+        const uint32_t inf0 = dsp0.infers;
+        const uint32_t sl0 = dsp0.slices;
         int heard = 0;
         uint32_t hits = 0;
         uint32_t seen = 0;
+        uint32_t dsp_blocks = 0;
+        uint32_t skipped = 0;
         uint64_t max_ac = 0;
-        for (uint32_t i = 0; i < DOZE_PROBE_BLOCKS; i++) {
+        for (uint32_t i = 0; i < DOZE_PROBE_MAX_BLOCKS; i++) {
+            if (audio_dsp_listening()) {
+                heard = 1;
+                break;
+            }
             const int32_t *samples;
             size_t n;
             if (!wait_dma_block(&samples, &n)) {
@@ -352,27 +319,54 @@ static void run_doze(void) {
             taskENTER_CRITICAL(&s_lock);
             s_stats.doze_probes++;
             taskEXIT_CRITICAL(&s_lock);
-            if (vad_against(last_ac, s_probe_noise, DOZE_GLITCH_K)) {
-                continue; // DMA junk: neither voice nor silence
+            if (vad_against(last_ac, s_probe_noise, DOZE_PROBE_GLITCH_K)) {
+                skipped++;
+                continue; // extreme DMA junk, well above observed loud speech
             }
             if (vad_against(last_ac, s_probe_noise, DOZE_PROBE_RATIO_K)) {
                 hits++;
-                if (hits >= DOZE_VOICE_BLOCKS) {
-                    heard = 1;
-                    break;
-                }
+            }
+            if (audio_dsp_try_submit(samples, n, last_ac)) {
+                dsp_blocks++;
+                taskENTER_CRITICAL(&s_lock);
+                s_stats.doze_dsp_blocks++;
+                taskEXIT_CRITICAL(&s_lock);
             }
         }
+
+        // Ingest is higher prio than DSP on the same core. wait_dma_block
+        // can return immediately on a pending ping-pong buffer, so yield
+        // until DSP is idle or listening.
+        for (uint32_t i = 0; i < 40 && !heard; i++) {
+            if (audio_dsp_listening()) {
+                heard = 1;
+                break;
+            }
+            if (audio_dsp_idle()) {
+                break;
+            }
+            vTaskDelay(1);
+        }
+        if (!heard && audio_dsp_listening()) {
+            heard = 1;
+        }
+
+        audio_dsp_stats_t dsp_st;
+        audio_dsp_get_stats(&dsp_st);
         ESP_LOGI(TAG, "doze probe ac=%" PRIu64 " max=%" PRIu64 " floor=%" PRIu64
-                 " hits=%" PRIu32 "/%" PRIu32 " heard=%d",
-                 last_ac, max_ac, s_probe_noise, hits, seen, heard);
+                 " hits=%" PRIu32 "/%" PRIu32 " dsp=%" PRIu32 " skip=%" PRIu32
+                 " p_j=%" PRIu32 " p_max=%" PRIu32 " inf=%" PRIu32
+                 " sl=%" PRIu32 " wake=%d",
+                 last_ac, max_ac, s_probe_noise, hits, seen, dsp_blocks,
+                 skipped, dsp_st.prob_jarvis, dsp_st.prob_jarvis_max,
+                 dsp_st.infers - inf0, dsp_st.slices - sl0, heard);
         if (heard) {
             s_last_voice_us = esp_timer_get_time();
             taskENTER_CRITICAL(&s_lock);
             s_stats.doze_wakes++;
             s_stats.dozing = 0;
             taskEXIT_CRITICAL(&s_lock);
-            ESP_LOGI(TAG, "doze exit voiced");
+            ESP_LOGI(TAG, "doze exit wake");
             return; // I2S left enabled
         }
         if (!s_doze_enabled) {
@@ -405,8 +399,10 @@ static void ingest_task(void *arg) {
 
         if (s_boot_left == 0 && s_last_voice_us != 0 && s_doze_enabled &&
             !audio_dsp_listening() &&
-            (esp_timer_get_time() - s_last_voice_us) >
-                ((int64_t)DOZE_AFTER_MS * 1000)) {
+            (s_doze_now ||
+             (esp_timer_get_time() - s_last_voice_us) >
+                 ((int64_t)DOZE_AFTER_MS * 1000))) {
+            s_doze_now = false;
             run_doze();
         }
     }
@@ -449,6 +445,7 @@ void audio_ingest_reset_stats(void) {
     s_stats.period_min_us = 0;
     s_stats.doze_cycles = 0;
     s_stats.doze_probes = 0;
+    s_stats.doze_dsp_blocks = 0;
     s_stats.doze_wakes = 0;
     taskEXIT_CRITICAL(&s_lock);
 }
@@ -458,7 +455,14 @@ void audio_ingest_set_log(bool on) {
 }
 
 void audio_ingest_set_doze(bool on) {
+    int dozing;
+    taskENTER_CRITICAL(&s_lock);
+    dozing = s_stats.dozing;
+    taskEXIT_CRITICAL(&s_lock);
     s_doze_enabled = on;
+    // The CLI command is also an explicit request to enter doze on the
+    // next eligible ingest block; do not falsify the quiet_ms timestamp.
+    s_doze_now = on && !dozing;
 }
 
 esp_err_t audio_ingest_start(void) {
@@ -531,8 +535,9 @@ esp_err_t audio_ingest_start(void) {
     ESP_LOGI(TAG, "VAD: ac > %d*noise, hangover=%d blocks (~32 ms each); idle gate only",
              VAD_RATIO_K, VAD_HANGOVER_BLOCKS);
     ESP_LOGI(TAG, "LED GPIO %d on during Hey Jarvis listen window", (int)LED_GPIO);
-    ESP_LOGI(TAG, "doze after=%d ms sleep=%d ms discard=%d settle<%d*floor x%d probe=%d k=%d arm=%d",
-             DOZE_AFTER_MS, DOZE_SLEEP_MS, DOZE_DISCARD_BLOCKS, DOZE_SETTLED_K,
-             DOZE_SETTLE_QUIET, DOZE_PROBE_BLOCKS, DOZE_PROBE_RATIO_K, DOZE_ARM_BLOCKS);
+    ESP_LOGI(TAG, "doze after=%d ms sleep=%d ms flush=%d probe=%d k=%d glitch=%d",
+             DOZE_AFTER_MS, DOZE_SLEEP_MS, DOZE_FLUSH_BLOCKS,
+             DOZE_PROBE_MAX_BLOCKS, DOZE_PROBE_RATIO_K,
+             DOZE_PROBE_GLITCH_K);
     return ESP_OK;
 }

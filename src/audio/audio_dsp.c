@@ -64,8 +64,10 @@ static struct FrontendState s_frontend;
 static det_t s_det[WAKE_SLOT_COUNT];
 static int64_t s_last_block_us;
 static volatile bool s_listening;
+static volatile int s_probe_arm;
 static int64_t s_listen_deadline_us;
 static int s_led_on;
+static uint32_t s_prob_jarvis_max;
 #if CONFIG_PM_ENABLE
 static esp_pm_lock_handle_t s_cpu_lock;
 #endif
@@ -192,6 +194,9 @@ static bool feed_slot(wake_slot_t slot, const int8_t feat[WAKE_FEATURE_SIZE]) {
         }
         if (err == ESP_OK) {
             *prob_stat = prob;
+            if (slot == WAKE_SLOT_JARVIS && prob > s_prob_jarvis_max) {
+                s_prob_jarvis_max = prob;
+            }
         }
         taskEXIT_CRITICAL(&s_lock);
     }
@@ -267,6 +272,14 @@ static void dsp_task(void *arg) {
                 taskEXIT_CRITICAL(&s_lock);
                 exit_listen("timeout");
             }
+        } else if (s_probe_arm) {
+            s_probe_arm = 0;
+            reset_slot(WAKE_SLOT_JARVIS, 0);
+            FrontendReset(&s_frontend);
+            taskENTER_CRITICAL(&s_lock);
+            s_resets++;
+            s_prob_jarvis_max = 0;
+            taskEXIT_CRITICAL(&s_lock);
         } else if (s_last_block_us != 0 && (t0 - s_last_block_us) > WAKE_GAP_US) {
             reset_slot(WAKE_SLOT_JARVIS, -WAKE_WARMUP_SLICES);
             FrontendReset(&s_frontend);
@@ -434,6 +447,19 @@ bool audio_dsp_listening(void) {
     return s_listening;
 }
 
+void audio_dsp_begin_probe(void) {
+    s_prob_jarvis_max = 0;
+    s_probe_arm = 1;
+}
+
+bool audio_dsp_idle(void) {
+    if (s_free == NULL || s_filled == NULL) {
+        return true;
+    }
+    return uxQueueMessagesWaiting(s_filled) == 0 &&
+           uxQueueMessagesWaiting(s_free) == AUDIO_DSP_QUEUE_LEN;
+}
+
 uint32_t audio_dsp_drops(void) {
     return s_drops;
 }
@@ -471,6 +497,7 @@ void audio_dsp_get_stats(audio_dsp_stats_t *out) {
     out->det_off = s_det_off;
     out->listen_timeouts = s_listen_timeouts;
     out->prob_jarvis = s_prob_jarvis;
+    out->prob_jarvis_max = s_prob_jarvis_max;
     out->prob_on = s_prob_on;
     out->prob_off = s_prob_off;
     out->resets = s_resets;
@@ -499,6 +526,7 @@ void audio_dsp_reset_stats(void) {
     s_det_off = 0;
     s_listen_timeouts = 0;
     s_prob_jarvis = 0;
+    s_prob_jarvis_max = 0;
     s_prob_on = 0;
     s_prob_off = 0;
     s_resets = 0;

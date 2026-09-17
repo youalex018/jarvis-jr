@@ -21,6 +21,12 @@ bool audio_dsp_try_submit(const int32_t *dma_samples, size_t n, uint64_t ac_mean
 // True while Hey Jarvis listen window is open (ingest submits every block).
 bool audio_dsp_listening(void);
 
+// Arm the next DSP block to reset Jarvis with no warmup (on the DSP task).
+void audio_dsp_begin_probe(void);
+
+// True when every pool block is on the free queue (DSP blocked on receive).
+bool audio_dsp_idle(void);
+
 uint32_t audio_dsp_drops(void);
 UBaseType_t audio_dsp_queue_waiting(void);
 TaskHandle_t audio_dsp_task(void);
@@ -44,6 +50,7 @@ typedef struct {
     uint32_t det_off;
     uint32_t listen_timeouts;
     uint32_t prob_jarvis;
+    uint32_t prob_jarvis_max;
     uint32_t prob_on;
     uint32_t prob_off;
     uint32_t resets;
