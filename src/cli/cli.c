@@ -3,6 +3,7 @@
 #include "audio_dsp.h"
 #include "audio_ingest.h"
 #include "net.h"
+#include "power.h"
 
 #include <ctype.h>
 #include <inttypes.h>
@@ -62,6 +63,8 @@ static void cmd_help(void) {
     printf("stats         dump timings, HWM, ovf, queue\r\n");
     printf("log on|off    1 Hz ingest log\r\n");
     printf("reset         zero max/min/ovf/drops/totals\r\n");
+    printf("pm            dump PM locks and sleep counts\r\n");
+    printf("pm doze on|off  enable/disable ingest doze\r\n");
     printf("wifi <ssid> <pass>  save STA creds (no spaces in ssid)\r\n");
     printf("wiz <ip>      save bulb IPv4\r\n");
     printf("wiz on|off    send setPilot now\r\n");
@@ -90,11 +93,17 @@ static void cmd_stats(void) {
     printf("ingest blocks=%" PRIu32 " ovf=%" PRIu32
            " proc_us last=%" PRIu32 " avg=%" PRIu32 " max=%" PRIu32
            " period_us last=%" PRIu32 " min=%" PRIu32 " max=%" PRIu32
-           " noise=%" PRIu64 " voiced=%d led=%d hwm=%" PRIu32 "\r\n",
+           " noise=%" PRIu64 " voiced=%d hang=%" PRIu32 " led=%d"
+           " doze_en=%d dozing=%d quiet_ms=%" PRIu32
+           " cycles=%" PRIu32 " probes=%" PRIu32 " wakes=%" PRIu32
+           " hwm=%" PRIu32 "\r\n",
            in.blocks, in.overrun,
            in.proc_last_us, proc_avg, in.proc_max_us,
            in.period_last_us, in.period_min_us, in.period_max_us,
-           in.noise, in.voiced, in.led_on, in.stack_hwm);
+           in.noise, in.voiced, in.hang, in.led_on,
+           in.doze_en, in.dozing, in.quiet_ms,
+           in.doze_cycles, in.doze_probes, in.doze_wakes,
+           in.stack_hwm);
     printf("dsp    blocks=%" PRIu32 " drops=%" PRIu32 " depth=%" PRIu32
            " proc_us last=%" PRIu32 " max=%" PRIu32 " hwm=%" PRIu32 "\r\n",
            dsp.blocks, dsp.drops, dsp.depth,
@@ -150,6 +159,20 @@ static void dispatch(char *line) {
         audio_dsp_reset_stats();
         net_reset_stats();
         printf("ok\r\n");
+        return;
+    }
+    if (strcmp(line, "pm") == 0) {
+        power_dump();
+        return;
+    }
+    if (strcmp(line, "pm doze on") == 0) {
+        audio_ingest_set_doze(true);
+        printf("doze on\r\n");
+        return;
+    }
+    if (strcmp(line, "pm doze off") == 0) {
+        audio_ingest_set_doze(false);
+        printf("doze off\r\n");
         return;
     }
 

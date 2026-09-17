@@ -1,143 +1,67 @@
-# Jarvis-Jr - Edge AI Voice Activated Light Controller
+# Jarvis Jr
 
-ESP-IDF firmware via PlatformIO. Run these in a **new** PowerShell. Active env: `esp32-s3-nano` (`board = arduino_nano_esp32` — Waveshare ESP32-S3-Nano / Arduino Nano ESP32).
+On-device voice control for a lamp. Say **Hey Jarvis**, then **light on** or **light off**. The phrase is recognized on an ESP32-S3. The bulb is switched over the local network. There is no cloud, no phone assistant, and no audio leaving the desk.
 
-On-device **"Hey Jarvis"** (microWakeWord v2 INT8) opens a 3 s listen window and lights GPIO 48. **"light on"** / **"light off"** (optional `.tflite`s) set a local WiZ bulb over UDP. The LED stays on until a command is recognized or the window expires. No cloud.
+## What you say
 
-After clone: `git submodule update --init --recursive`. The factory app partition is **4 MB** (`partitions.csv`); TFLM does not fit the default 1 MB app. If the compile runs out of RAM, use `pio run -j 2`.
+1. **Hey Jarvis** — the board wakes up and the on-board LED turns on.
+2. Within about three seconds, **light on** or **light off**.
+3. The LED turns off. A WiZ bulb on the same LAN switches if Wi-Fi is configured.
 
-If `pio` is not found:
+If you miss the window, say **Hey Jarvis** again. A serial command can still toggle the bulb without a wake word.
 
-```powershell
-& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" --version
+## Hardware
+
+| Piece | Role |
+|---|---|
+| [Waveshare ESP32-S3-Nano](https://www.waveshare.com/wiki/ESP32-S3-Nano) | Dual-core MCU, 8 MB PSRAM, 16 MB flash, USB-C |
+| [INMP441](https://www.invensense.com/products/digital/inmp441/) | I2S MEMS microphone |
+| WiZ color bulb | Local JSON/UDP on port 38899 (no WiZ cloud) |
+| User LED | GPIO 48 / D13, on only during the listen window |
+
+The microphone wiring is in the [firmware notes](docs/firmware.md#microphone-wiring).
+
+## How it works
+
+Audio never leaves the chip. DMA fills 32 ms microphone blocks. A cheap energy check (voice activity detection) decides whether to run the neural net. A streaming INT8 **Hey Jarvis** model opens the listen window. Two smaller command models run only in that window and send `setPilot` to the bulb.
+
+After a stretch of silence the firmware stops the I2S clock so the chip can light-sleep, then briefly listens again. That is a power trade-off: the first wake word after a long quiet period can land in a sleep gap and need a repeat.
+
+```mermaid
+flowchart LR
+  mic[Microphone] --> dma[I2S DMA]
+  dma --> vad[Voice gate]
+  vad --> wake[Hey Jarvis]
+  wake --> cmd["light on / light off"]
+  cmd --> bulb[WiZ bulb]
 ```
 
-Use that full path in place of `pio` below, or restart the terminal after installing PlatformIO.
+Stack: **C**, ESP32-S3, ESP-IDF, FreeRTOS, **TFLite Micro**, I2S/DMA.
 
----
+## Status
 
-## Everyday commands
+Working on the S3-Nano: wake word, listen window, command models, local WiZ control, USB CLI, and idle doze / light sleep. Current draw is not published until it is measured. Wi-Fi credentials and the bulb IP live in on-chip flash (NVS), never in this repository.
 
-| What | Command |
-|---|---|
-| Toolchain alive | `pio --version` |
-| Which COM port Windows gave the board | `pio device list` |
-| Compile only (no cable) | `pio run` (`pio run -j 2` if TFLM OOMs) |
-| Compile and flash | `pio run -t upload` |
-| Serial logs (115200) | `pio device monitor` |
-| Flash, then open serial | `pio run -t upload -t monitor` |
-| Wipe the build cache | `pio run -t clean` |
-| Rebuild from scratch | `pio run -t fullclean` then `pio run` |
+## Build and flash
 
-Leave the monitor with **Ctrl+C**. While it is open, uploads often fail (the port is busy).
+PlatformIO + ESP-IDF, not the Arduino framework. After clone:
 
----
-
-## COM port
-
-| VID:PID | What it is | Use with esptool? |
-|---|---|---|
-| `2341:0070` | Arduino CDC (factory). Was COM9. | **No** |
-| `303A:1001` | ESP32 ROM download | **Yes — first IDF flash** |
-| `303A:4001` | This firmware’s USB Serial/JTAG | Monitor / later flashes |
-| `BTHENUM` | Bluetooth | Never |
-
-There is no BOOT button. **B1** (GPIO0) is on the **3V3 / VUSB** side of the header.
-
-**First IDF flash (Arduino factory image):**
-
-1. Unplug/replug so USB is healthy again. Close the monitor.
-2. Jumper **B1 to GND**. RGB should go **green**.
-3. Tap **RST** while the jumper is on.
-4. **Remove the jumper**. RGB should stay **purple**.
-5. `pio device list` — pick **`303A:1001`** (new COM, not 2341).
-6. Set `upload_port` / `monitor_port` in `platformio.ini` to that COM.
-7. `pio run -t upload` immediately.
-8. Tap **RST** once more so the new app starts.
-
-Do not double-tap RST (Arduino DFU / green fade). Do not flash `2341:0070`.
-
----
-
-## sdkconfig
-
-| File | Role |
-|---|---|
-| `sdkconfig.defaults` | Tickless idle |
-| `sdkconfig.defaults.esp32s3` | 16 MB flash, octal PSRAM, USB Serial/JTAG, custom `partitions.csv` |
-
-PlatformIO generates `sdkconfig.esp32-s3-nano` locally; it is gitignored. After changing the `.defaults` files: `pio run -t fullclean` then `pio run`.
-
-Expect `CPU Cores: 2` and **non-zero** `External PSRAM` on the Nano.
-
----
-
-## Train `light on` / `light off` (Google Colab)
-
-Checked-in `models/light_on.tflite` and `models/light_off.tflite` are the Colab-trained pair used on the desk. Firmware embeds them when those exact names exist. Retrain on **Colab with a GPU**, not this PC, if you want new weights:
-
-1. Open [Google Colab](https://colab.research.google.com/). Runtime → Change runtime type → **T4 GPU**.
-2. File → Upload notebook → `train/colab_light_on_off.ipynb` from this repo.
-3. Runtime → Run all. After the install cell: **Runtime → Restart session**, then run from **Config** downward.
-4. Download `light_on.tflite` and `light_off.tflite`. Copy both into `models/` (exact names).
-5. Close the serial monitor, then `pio run -j 2` and `pio run -t upload`.
-
-Boot must log `light_on` and `light_off`, not `cmd models: none`. CMake only sees new `.tflite` files at configure time; if they were added after a prior build, `pio run -t fullclean` then `pio run -j 2`. Then: Hey Jarvis → LED on → “light on” / “light off” within 3 s → bulb + LED off.
-
-Desk-checked knobs (normal voice): `AUDIO_PCM_GAIN` 4, `VAD_RATIO_K` 3, Jarvis cutoff 230 / window 5, command cutoff 204 / window 3. See `include/wake_model.h`, `include/audio_dsp.h`, `include/audio_ingest.h`.
-
----
-
-## First-party, generated, submodule, vendored
-
-| Path | What it is |
-|---|---|
-| `src/`, `include/` | First-party C |
-| `components/wake_model/` (`wake_model.cc`, `gen_model_c.py`) | First-party C++ TFLM wrapper |
-| `models/hey_jarvis.tflite` | Checked-in wake model (source of truth) |
-| `models/light_on.tflite`, `models/light_off.tflite` | Optional command models; omit to build listen-window-only |
-| `train/colab_light_on_off.ipynb` | Google Colab notebook to train those two models |
-| `hey_jarvis_model.c`, `light_on_model.c`, `light_off_model.c` | **Generated** at CMake configure from the `.tflite`s; gitignored |
-| `components/esp-tflite-micro` | **Git submodule** (`espressif/esp-tflite-micro`, pin `99f49e1` in `.gitmodules`) |
-| `components/tflite_microfrontend/` | **Vendored** TFLM frontend (not a submodule). See `ORIGIN.txt` |
-| `managed_components/`, `dependencies.lock` | **Generated** IDF Component Manager fetch of `esp-nn`; gitignored |
-| `.pio/`, `sdkconfig.esp32-s3-nano` | **Generated** PlatformIO/IDF build; gitignored |
-
----
-
-## If upload fails (ROM download)
-
-Jumper **B1 to GND**, tap **RST**, remove the jumper (RGB purple), then flash the `303A:1001` COM from `pio device list`.
-
----
-
-## What “debug” is on this desk
-
-- `pio device monitor` — boot banner, `ingest:` lines, `hey jarvis` / `listen start|end`, `ovf`, min/max
-- On-board LED (`LED_GPIO` in `include/board.h`) — D13 / GPIO 48, **on during the listen window only**
-- Rebuild with extra `ESP_LOGI` in the ingest task if you need a number
-
-GDB (`pio debug`) needs a debug session in Cursor/VS Code. The S3 has built-in USB JTAG; it is not required for bring-up. Prefer serial logs until ingest is proven.
-
----
-
-## INMP441 pins (S3-Nano build)
-
-| Mic | GPIO | Header |
-|---|---|---|
-| SCK (BCLK) | 10 | D7 |
-| WS | 17 | D8 |
-| SD | 21 | D10 |
-| VDD | — | 3V3 |
-| GND, L/R | — | GND |
-
----
-
-## Monitor tips
-
-```powershell
-pio device monitor --baud 115200
-pio device monitor --filter time
+```text
+git submodule update --init --recursive
+pio run -j 2
 ```
 
-Expect `CPU Cores: 2` and non-zero PSRAM on the Nano. Ingest logs about once a second with `dc`, `ac`, `noise`, and `voiced`. Stay quiet for ~0.5 s after boot so the noise floor can learn.
+The Waveshare Nano ships with an Arduino USB stack that **cannot** be flashed by esptool. The first IDF install needs a one-time bootloader entry. Serial monitor settings on Windows must leave RTS/DTR off, or the COM port dies.
+
+Step-by-step clone, COM ports, wiring, CLI, power-management, and training: **[docs/firmware.md](docs/firmware.md)**.
+
+## License and models
+
+| Item | Notes |
+|---|---|
+| `models/hey_jarvis.tflite` | Official microWakeWord v2 “Hey Jarvis” (Kevin Ahrendt / ESPHome), [Apache 2.0](models/LICENSE) |
+| `models/light_on.tflite`, `models/light_off.tflite` | Custom command models. Background training audio has mixed licenses — see [models/NOTICE](models/NOTICE) |
+| `components/esp-tflite-micro` | Espressif TFLite Micro submodule, Apache 2.0 |
+| `components/tflite_microfrontend/` | Vendored TFLM frontend, Apache 2.0 ([ORIGIN.txt](components/tflite_microfrontend/ORIGIN.txt)) |
+
+First-party firmware in `src/`, `include/`, and `components/wake_model/` has no root license file yet. Add one before treating this as a formal open-source release.

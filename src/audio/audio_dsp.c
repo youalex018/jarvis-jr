@@ -11,7 +11,9 @@
 #include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_timer.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -64,6 +66,9 @@ static int64_t s_last_block_us;
 static volatile bool s_listening;
 static int64_t s_listen_deadline_us;
 static int s_led_on;
+#if CONFIG_PM_ENABLE
+static esp_pm_lock_handle_t s_cpu_lock;
+#endif
 
 static void led_set(int on) {
     s_led_on = on ? 1 : 0;
@@ -250,6 +255,9 @@ static void dsp_task(void *arg) {
         if (xQueueReceive(s_filled, &block, portMAX_DELAY) != pdTRUE) {
             continue;
         }
+#if CONFIG_PM_ENABLE
+        (void)esp_pm_lock_acquire(s_cpu_lock);
+#endif
 
         const int64_t t0 = esp_timer_get_time();
         if (s_listening) {
@@ -303,6 +311,9 @@ static void dsp_task(void *arg) {
         taskEXIT_CRITICAL(&s_lock);
 
         (void)xQueueSend(s_free, &block, portMAX_DELAY);
+#if CONFIG_PM_ENABLE
+        (void)esp_pm_lock_release(s_cpu_lock);
+#endif
     }
 }
 
@@ -351,6 +362,13 @@ esp_err_t audio_dsp_start(void) {
     }
     s_arena_used = (uint32_t)wake_model_arena_used(WAKE_SLOT_JARVIS);
     reset_slot(WAKE_SLOT_JARVIS, -WAKE_WARMUP_SLICES);
+
+#if CONFIG_PM_ENABLE
+    err = esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "dsp", &s_cpu_lock);
+    if (err != ESP_OK) {
+        return err;
+    }
+#endif
 
     gpio_reset_pin(LED_GPIO);
     gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);

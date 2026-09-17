@@ -10,6 +10,7 @@
 #define NET_LIGHT_QUEUE_LEN 4
 #define WIZ_UDP_PORT 38899
 #define NET_NVS_NAMESPACE "jarvis"
+#define NET_WIFI_PS WIFI_PS_MIN_MODEM  // release PM lock between DTIM; needed for doze light sleep
 
 #define WIZ_ON  "{\"method\":\"setPilot\",\"params\":{\"state\":true}}"
 #define WIZ_OFF "{\"method\":\"setPilot\",\"params\":{\"state\":false}}"

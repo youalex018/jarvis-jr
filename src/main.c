@@ -1,4 +1,4 @@
-// Boot: start DSP, ingest, CLI, and net.
+// Boot: start PM, DSP, ingest, CLI, and net.
 #include <stdio.h>
 #include "esp_log.h"
 #include "esp_chip_info.h"
@@ -8,6 +8,7 @@
 #include "audio_ingest.h"
 #include "cli.h"
 #include "net.h"
+#include "power.h"
 
 static const char *TAG = "boot";
 
@@ -21,9 +22,10 @@ void app_main(void) {
     size_t psram_size = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
     printf("External PSRAM: %d MB\n", (int)(psram_size / (1024 * 1024)));
 
+    ESP_ERROR_CHECK(power_init());
     ESP_ERROR_CHECK(audio_dsp_start());
     ESP_ERROR_CHECK(audio_ingest_start());
     ESP_ERROR_CHECK(cli_start());
     ESP_ERROR_CHECK(net_start());
-    ESP_LOGI(TAG, "dsp + ingest + cli + net running; app_main returning");
+    ESP_LOGI(TAG, "pm + dsp + ingest + cli + net running; app_main returning");
 }
