@@ -18,6 +18,7 @@ Build, flash, wiring, runtime architecture, CLI, power, and training for [Jarvis
 - [Training command models](#training-command-models)
 - [Repository layout](#repository-layout)
 - [Debugging](#debugging)
+- [Licenses and models](#licenses-and-models)
 
 ## Requirements
 
@@ -175,6 +176,8 @@ Do not mix `.cc` into `src/` (leaks `-fuse-cxa-atexit` onto C compiles). The onl
 
 CLI `wiz on|off` still works and does not need the listen window.
 
+Idle **doze** is separate: after 30 s without a listen window (or `pm doze on`), ingest stops I2S for 500 ms, then probes ~2 s for **Hey Jarvis**. It exits doze only on a wake-word hit. Desk USB still duty-cycles I2S; the chip itself does not light-sleep while a PC USB host is attached. See [Power and light sleep](#power-and-light-sleep).
+
 ## Power and light sleep
 
 Tickless idle is on. `power_init()` (`src/power_management/power.c`) calls `esp_pm_configure()` with CPU max 160 MHz, min 40 MHz (XTAL), and `light_sleep_enable = true`.
@@ -183,7 +186,7 @@ The firmware never calls `esp_light_sleep_start()` itself. Light sleep is entere
 
 While I2S is enabled, the IDF I2S driver holds `ESP_PM_APB_FREQ_MAX`, which keeps the PLL up and **blocks light sleep**. That is required: S3 light sleep clock-gates I2S/GDMA, so the mic cannot stream through sleep.
 
-After `DOZE_AFTER_MS` (30 s) without **sustained** VAD, ingest **disables** the I2S channel, `vTaskDelay`s `DOZE_SLEEP_MS` (500 ms), then re-enables. It drops only `DOZE_FLUSH_BLOCKS` (2, ~64 ms) of invalid clock-start DMA, then listens for `DOZE_PROBE_MAX_BLOCKS` (~2 s). A longer timed discard was removed because it could cut “Hey” off the phrase. Probe blocks below the high `DOZE_PROBE_GLITCH_K` ceiling are submitted to DSP. Both awake and probe glitch ceilings preserve loud speech; the former 16× cutoff could classify valid speech as DMA junk when the learned floor was low. There is **no settle wait**: “Hey Jarvis” has syllable gaps below 2× floor, so settle still completed and the phrase never reached the model. The restart tail is fed to the model, which rejects it. Each probe arms DSP to reset Jarvis with no warmup (on the DSP task, so the interpreter is not reset from ingest). Doze exits only when the wake-word model fires (`audio_dsp_listening()`). `doze probe` `hits` are diagnostic; `skip` counts extreme blocks, `p_j` is last Jarvis probability, `p_max` is the peak during that probe, and `inf`/`sl` are inferences and feature slices. After the probe, ingest yields until DSP is idle.
+After `DOZE_AFTER_MS` (30 s) without a listen window, ingest **disables** the I2S channel, `vTaskDelay`s `DOZE_SLEEP_MS` (500 ms), then re-enables. It drops only `DOZE_FLUSH_BLOCKS` (2, ~64 ms) of invalid clock-start DMA, then listens for `DOZE_PROBE_MAX_BLOCKS` (~2 s). A longer timed discard was removed because it could cut “Hey” off the phrase. Probe blocks below the high `DOZE_PROBE_GLITCH_K` ceiling are submitted to DSP. Both awake and probe glitch ceilings preserve loud speech; the former 16× cutoff could classify valid speech as DMA junk when the learned floor was low. There is **no settle wait**: “Hey Jarvis” has syllable gaps below 2× floor, so settle still completed and the phrase never reached the model. The restart tail is fed to the model, which rejects it. Each probe arms DSP to reset Jarvis with no warmup (on the DSP task, so the interpreter is not reset from ingest). Doze exits only when the wake-word model fires (`audio_dsp_listening()`). `doze probe` `hits` are diagnostic; `skip` counts extreme blocks, `p_j` is last Jarvis probability, `p_max` is the peak during that probe, and `inf`/`sl` are inferences and feature slices. After the probe, ingest yields until DSP is idle.
 
 VAD hangover still feeds DSP so a pause inside “Hey Jarvis” is not dropped. It does **not** gate doze or reset its clock. The 30 s clock (`quiet_ms`) resets only when DSP is in its listen window (the wake word fired); magnitude VAD also fires on unnoticed room noise and I2S tails. Doze wake explicitly stamps the same clock before returning to awake.
 
@@ -199,9 +202,16 @@ Other locks:
 | `ESP_PM_APB_FREQ_MAX` (`i2s_driver`) | Held while the RX channel is enabled | Blocks light sleep |
 | `ESP_PM_NO_LIGHT_SLEEP` (`usb_serial_jtag`) | Held while a USB host is attached (`CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION`) | Serial stays up; no light sleep |
 
-USB Serial/JTAG cannot remain enumerated through S3 light sleep. With a PC attached, doze still stops I2S, but the idle task will not enter light sleep. To observe real sleep: close the monitor, unplug PC USB, power from a wall charger (not a power bank — low-current cutoff), wait a couple of minutes, re-plug, run `pm`. Expect `light_sleep_counts > 0`. If COM does not come back, tap RST with the monitor closed.
+USB Serial/JTAG cannot remain enumerated through S3 light sleep. With a **USB host** (the PC) attached, doze still stops I2S, but the idle task will not enter light sleep. A dumb 5 V supply is usually **not** a USB host, so `NO_LIGHT_SLEEP` can drop **only if 5 V stays up on another path**.
 
-Do not quote milliamp numbers until they are measured on the board.
+This Nano has **one USB-C jack and no battery**. Unplugging USB-C from the PC **is** a power cut: the chip cold-boots, `uptime_s=0`, and `light_sleep_counts` are gone. Moving the same cable from the PC to a wall brick is **not** a keep-alive; it resets. Desk-checked 2026-09-17.
+
+To keep the chip alive while the USB host goes away:
+
+1. **Header 5 V (preferred).** With the PC still attached, feed a regulated **5 V** supply into the Nano **`5V` pin and GND** (bench supply or a 5 V wall adapter on those pins, not a power bank). Confirm `stats` is still incrementing. Close the monitor. Unplug **only** USB-C from the PC. Wait in doze a few minutes. Plug USB-C back **without removing the header 5 V**, then `pm`. Expect `light_sleep_counts > 0`. If the chip dies when USB-C unplugs, the header is not powering 3V3 — fix that before blaming firmware.
+2. **Powered USB hub.** Wall-power the hub, board on the hub, hub upstream to the PC. Unplug only the hub’s cable to the PC. The hub still supplies 5 V; the USB host is gone.
+
+A meter in series with the 5 V header, PC unplugged, is the actual current measurement. Do not quote milliamp numbers until they are measured on the board. If COM does not come back after replug, tap RST with the monitor closed.
 
 Wi-Fi uses `WIFI_PS_MIN_MODEM`, so the chip still wakes on DTIM beacons. Sleep savings are bounded by the AP beacon interval. If UDP to the bulb gets flaky, the knob is `NET_WIFI_PS` in `include/net.h`.
 
@@ -244,7 +254,7 @@ USB Serial/JTAG driver + `usb_serial_jtag_vfs_use_driver()`, unbuffered stdout. 
 
 ## Detection knobs
 
-Tune these before retraining. If the bulb flips on TV/noise **inside** the 3 s window, raise `WAKE_CMD_PROB_CUTOFF`. If wake is shy, lower `VAD_RATIO_K` or the Jarvis cutoff first, not the command cutoff.
+Tune these before retraining. If the bulb flips on TV/noise **inside** the 3 s window, raise `WAKE_CMD_PROB_CUTOFF`. If doze wake is shy, check `doze enter floor=` (a high frozen floor lets restart junk into DSP) and probe `p_max` before lowering VAD or retraining.
 
 | Knob | File | Default | Why |
 |---|---|---|---|
@@ -292,7 +302,7 @@ Notebook pitfalls already patched: do not install `piper-phonemize-cross` on Col
 | `include/audio_dsp.h` | Queue len, PCM gain, DSP prio/core |
 | `include/wake_model.h` | Slot enum, cutoffs, windows, listen timeout |
 | `include/net.h` | Net prio, payloads, NVS namespace, Wi-Fi PS |
-| `include/power.h` | PM min frequency |
+| `include/power.h` | PM min frequency; USB host vs header 5 V keep-alive |
 | `components/wake_model/` | C++ TFLM wrapper + `gen_model_c.py` |
 | `components/esp-tflite-micro` | Git submodule `espressif/esp-tflite-micro` pin `99f49e1` (not tag v1.3.8; no IDF 6) |
 | `components/tflite_microfrontend/` | Vendored TFLM frontend. See `ORIGIN.txt` |
@@ -313,7 +323,7 @@ First-party C/C++ comments are `//` only. CMake/Python keep `#`.
 
 - `pio device monitor` — boot banner, `ingest:` lines, `hey jarvis` / `listen start|end` / `doze enter|exit`, `ovf`, min/max
 - On-board LED (`LED_GPIO` in `include/board.h`) — D13 / GPIO 48, on during the listen window only
-- CLI `stats` and `pm`
+- CLI `stats` and `pm` (`light_sleep_counts` stay 0 on desk USB; need header 5 V or a hub to observe sleep)
 - Extra `ESP_LOGI` in ingest if a number is missing
 
 GDB (`pio debug`) is optional. The S3 has built-in USB JTAG. Prefer serial logs until ingest is proven (`ovf=0`, `period_us` ~32000). Stay quiet ~0.5 s after boot so the noise floor can learn.
@@ -322,3 +332,14 @@ GDB (`pio debug`) is optional. The S3 has built-in USB JTAG. Prefer serial logs 
 pio device monitor --baud 115200
 pio device monitor --filter time
 ```
+
+## Licenses and models
+
+| Item | Notes |
+|---|---|
+| `models/hey_jarvis.tflite` | Official microWakeWord v2 “Hey Jarvis” (Kevin Ahrendt / ESPHome), [Apache 2.0](../models/LICENSE) |
+| `models/light_on.tflite`, `models/light_off.tflite` | Custom command models. Background training audio has mixed licenses — see [models/NOTICE](../models/NOTICE) |
+| `components/esp-tflite-micro` | Espressif TFLite Micro submodule, Apache 2.0 |
+| `components/tflite_microfrontend/` | Vendored TFLM frontend, Apache 2.0 ([ORIGIN.txt](../components/tflite_microfrontend/ORIGIN.txt)) |
+
+First-party firmware in `src/`, `include/`, and `components/wake_model/` has no root license file yet. Add one before treating this as a formal open-source release.

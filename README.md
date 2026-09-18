@@ -1,67 +1,42 @@
-# Jarvis Jr
+# Jarvis Jr - Edge AI Voice Activated Light
 
-On-device voice control for a lamp. Say **Hey Jarvis**, then **light on** or **light off**. The phrase is recognized on an ESP32-S3. The bulb is switched over the local network. There is no cloud, no phone assistant, and no audio leaving the desk.
+Every smart speaker on the market can turn on a lamp. Every one of them does it by shipping your voice to a data centre first. I wanted to know how much of that trip was actually necessary, so I built one that never leaves the desk.
 
-## What you say
+Jarvis Jr is a voice-controlled lamp that fits in your hand. Say **Hey Jarvis**, then **light on** or **light off**, and a WiZ bulb across the room does what you said. The part that matters is what doesn't happen in between. There is no cloud, no phone app, and no account.
 
-1. **Hey Jarvis** — the board wakes up and the on-board LED turns on.
-2. Within about three seconds, **light on** or **light off**.
-3. The LED turns off. A WiZ bulb on the same LAN switches if Wi-Fi is configured.
+The microphone feeds an ESP32-S3, a microcontroller with a few hundred kilobytes of RAM, and that chip alone decides whether it just heard its name. A small neural net listens for the wake word around the clock. Two even smaller ones wake up only for the three seconds after it, long enough to catch the command, and the board's LED stays lit so you know it's listening. When it decides, it sends one UDP packet to the bulb over your own Wi-Fi and goes back to sleep. If you were too slow, you say the name again. If you'd rather type, a serial console CLI can flip the bulb too.
 
-If you miss the window, say **Hey Jarvis** again. A serial command can still toggle the bulb without a wake word.
+Doing all of this on a chip that costs a few dollars, without a cloud to lean on, is the fun part. It has to be quiet enough to stay put during a conversation, quick enough to catch a single "Hey Jarvis", and frugal enough to spend most of its life asleep. The wiring, the models, the power tricks, and the ways this can go wrong are in [docs/firmware.md](docs/firmware.md).
 
 ## Hardware
 
-| Piece | Role |
-|---|---|
-| [Waveshare ESP32-S3-Nano](https://www.waveshare.com/wiki/ESP32-S3-Nano) | Dual-core MCU, 8 MB PSRAM, 16 MB flash, USB-C |
-| [INMP441](https://www.invensense.com/products/digital/inmp441/) | I2S MEMS microphone |
-| WiZ color bulb | Local JSON/UDP on port 38899 (no WiZ cloud) |
-| User LED | GPIO 48 / D13, on only during the listen window |
+- [Waveshare ESP32-S3-Nano](https://www.waveshare.com/wiki/ESP32-S3-Nano)
+- [INMP441](https://www.invensense.com/products/digital/inmp441/) microphone
+- WiZ color bulb on the same LAN
 
-The microphone wiring is in the [firmware notes](docs/firmware.md#microphone-wiring).
+Mic pinout and the LED pin are in [docs/firmware.md](docs/firmware.md#microphone-wiring).
 
-## How it works
+The Nano is **USB-C only** (no battery). Unplugging the PC cable, or moving that same cable to a wall brick, cuts 5 V and resets the chip. `pm` `light_sleep_counts` cannot be read that way. Keep 5 V on the header (or a powered hub) **then** unplug USB-C from the PC. Full procedure: [Power and light sleep](docs/firmware.md#power-and-light-sleep).
 
-Audio never leaves the chip. DMA fills 32 ms microphone blocks. A cheap energy check (voice activity detection) decides whether to run the neural net. A streaming INT8 **Hey Jarvis** model opens the listen window. Two smaller command models run only in that window and send `setPilot` to the bulb.
+## Setup
 
-After a stretch of silence the firmware stops the I2S clock so the chip can light-sleep, then briefly listens again. That is a power trade-off: the first wake word after a long quiet period can land in a sleep gap and need a repeat.
-
-```mermaid
-flowchart LR
-  mic[Microphone] --> dma[I2S DMA]
-  dma --> vad[Voice gate]
-  vad --> wake[Hey Jarvis]
-  wake --> cmd["light on / light off"]
-  cmd --> bulb[WiZ bulb]
-```
-
-Stack: **C**, ESP32-S3, ESP-IDF, FreeRTOS, **TFLite Micro**, I2S/DMA.
-
-## Status
-
-Working on the S3-Nano: wake word, listen window, command models, local WiZ control, USB CLI, and idle doze / light sleep. Current draw is not published until it is measured. Wi-Fi credentials and the bulb IP live in on-chip flash (NVS), never in this repository.
-
-## Build and flash
-
-PlatformIO + ESP-IDF, not the Arduino framework. After clone:
+You need [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation.html) (`pio`). This project is ESP-IDF, not Arduino.
 
 ```text
-git submodule update --init --recursive
+git clone --recurse-submodules <this-repo>
+cd Jarvis-Jr
 pio run -j 2
+pio run -j 2 -t upload
+pio device monitor
 ```
 
-The Waveshare Nano ships with an Arduino USB stack that **cannot** be flashed by esptool. The first IDF install needs a one-time bootloader entry. Serial monitor settings on Windows must leave RTS/DTR off, or the COM port dies.
+Always pass `-j 2` if your computer OOMs. After the board boots, set Wi-Fi and the bulb (SSID must not contain spaces):
 
-Step-by-step clone, COM ports, wiring, CLI, power-management, and training: **[docs/firmware.md](docs/firmware.md)**.
+```text
+wifi <ssid> <pass>
+wiz <ip>
+```
 
-## License and models
+The board reboots after `wifi` so the station can join. Then `wiz on` / `wiz off` check the lamp without a wake word.
 
-| Item | Notes |
-|---|---|
-| `models/hey_jarvis.tflite` | Official microWakeWord v2 “Hey Jarvis” (Kevin Ahrendt / ESPHome), [Apache 2.0](models/LICENSE) |
-| `models/light_on.tflite`, `models/light_off.tflite` | Custom command models. Background training audio has mixed licenses — see [models/NOTICE](models/NOTICE) |
-| `components/esp-tflite-micro` | Espressif TFLite Micro submodule, Apache 2.0 |
-| `components/tflite_microfrontend/` | Vendored TFLM frontend, Apache 2.0 ([ORIGIN.txt](components/tflite_microfrontend/ORIGIN.txt)) |
-
-First-party firmware in `src/`, `include/`, and `components/wake_model/` has no root license file yet. Add one before treating this as a formal open-source release.
+A factory Waveshare image uses Arduino USB and cannot be flashed until you put the chip in ROM download once. COM ports, that jumper sequence, Windows serial settings, and everything else: **[docs/firmware.md](docs/firmware.md)**.

@@ -1,4 +1,5 @@
-// Power management: DFS + automatic light sleep (when no PM locks are held)
+// Power management: DFS + automatic light sleep (when no PM locks are held).
+// A PC USB host holds NO_LIGHT_SLEEP.
 #include "power.h"
 
 #include <stdio.h>

@@ -34,8 +34,8 @@ typedef struct {
     int voiced;
     int led_on;              // listen window (DSP), not VAD
     int doze_en;             // pm doze on|off
-    int dozing;              // I2S stopped; duty-cycling light sleep
-    uint32_t quiet_ms;       // since last sustained voice (doze clock)
+    int dozing;              // I2S stopped; chip may light-sleep if no USB host
+    uint32_t quiet_ms;       // since last listen window (doze clock)
     uint32_t hang;           // VAD hangover blocks left (DSP submit, not doze)
     uint32_t doze_cycles;    // times ingest entered doze
     uint32_t doze_probes;    // VAD blocks processed while probing
